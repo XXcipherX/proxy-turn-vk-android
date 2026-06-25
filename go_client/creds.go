@@ -87,6 +87,7 @@ const (
 	cacheSafetyMargin  = 60 * time.Second
 	maxCacheErrors     = 3
 	errorWindow        = 10 * time.Second
+	vkCallsAPIVersion  = "5.282"
 )
 
 var streamsPerCache = 10
@@ -396,7 +397,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 
 	// Step 2: getCallPreview (mimics real VK client behavior)
 	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&fields=photo_200&access_token=%s", link, token1)
-	_, err = doRequest(data, "https://api.vk.ru/method/calls.getCallPreview?v=5.275&client_id="+creds.ClientID)
+	_, err = doRequest(data, "https://api.vk.ru/method/calls.getCallPreview?v="+vkCallsAPIVersion+"&client_id="+creds.ClientID)
 	if err != nil {
 		log.Printf("[STREAM %d] [VK Auth] Warning: getCallPreview failed: %v", streamID, err)
 	}
@@ -405,7 +406,20 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 
 	// Step 3: getAnonymousToken (with captcha handling)
 	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s", link, escapedName, token1)
-	urlAddr := fmt.Sprintf("https://api.vk.ru/method/calls.getAnonymousToken?v=5.275&client_id=%s", creds.ClientID)
+	urlAddr := fmt.Sprintf("https://api.vk.ru/method/calls.getAnonymousToken?v=%s&client_id=%s", vkCallsAPIVersion, creds.ClientID)
+	buildCaptchaRetryData := func(captchaErr *VkCaptchaError, successToken string) string {
+		if captchaErr.CaptchaSid == "" {
+			return fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&success_token=%s&access_token=%s",
+				link, escapedName, neturl.QueryEscape(successToken), token1)
+		}
+
+		captchaAttempt := captchaErr.CaptchaAttempt
+		if captchaAttempt == "0" || captchaAttempt == "" {
+			captchaAttempt = "1"
+		}
+		return fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
+			link, escapedName, captchaErr.CaptchaSid, neturl.QueryEscape(successToken), captchaErr.CaptchaTs, captchaAttempt, token1)
+	}
 
 	var token2 string
 	var savedProfile *SavedProfile
@@ -433,13 +447,8 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 					return "", "", nil, fmt.Errorf("CAPTCHA_WAIT_REQUIRED")
 				}
 
-				captchaAttempt := captchaErr.CaptchaAttempt
-				if captchaAttempt == "0" || captchaAttempt == "" {
-					captchaAttempt = "1"
-				}
-
-				data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
-					link, escapedName, captchaErr.CaptchaSid, neturl.QueryEscape(successToken), captchaErr.CaptchaTs, captchaAttempt, token1)
+				log.Printf("[STREAM %d] [Captcha] Retrying getAnonymousToken with success_token (%d chars), captcha_sid=%q", streamID, len(successToken), captchaErr.CaptchaSid)
+				data = buildCaptchaRetryData(captchaErr, successToken)
 				continue
 			}
 			return "", "", nil, fmt.Errorf("VK API error: %v", errObj)
