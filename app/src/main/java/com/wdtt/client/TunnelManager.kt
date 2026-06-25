@@ -272,7 +272,14 @@ object TunnelManager {
                     val msgPrefixReplaced = line.replace(Regex("^\\d{4}/\\d{2}/\\d{2}\\s\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?\\s"), "")
                     val lineTrim = msgPrefixReplaced.trim()
 
-                    val isError = lineTrim.contains("Ошибка", true) || lineTrim.contains("error", true) || lineTrim.contains("FAIL", true) || lineTrim.contains("timeout", true) || lineTrim.contains("refused", true) || lineTrim.contains("FATAL_AUTH", true)
+                    val isError = lineTrim.contains("Ошибка", true) ||
+                        lineTrim.contains("error", true) ||
+                        lineTrim.contains("FAIL", true) ||
+                        lineTrim.contains("timeout", true) ||
+                        lineTrim.contains("refused", true) ||
+                        lineTrim.contains("panic", true) ||
+                        lineTrim.contains("fatal", true) ||
+                        lineTrim.contains("FATAL_AUTH", true)
 
                     if (lineTrim.contains("FATAL_AUTH")) {
                         val isWrapHandshakeTimeout = lineTrim.contains("DTLS timeout", true) ||
@@ -499,6 +506,8 @@ object TunnelManager {
                         
                         isError -> {
                             val errorKey = when {
+                                lineTrim.contains("panic", true) -> "err_go_panic"
+                                lineTrim.contains("fatal", true) -> "err_go_fatal"
                                 lineTrim.contains("lookup login.vk.ru", true) -> "err_vk_dns"
                                 lineTrim.contains("connection refused") -> "err_conn_refused"
                                 lineTrim.contains("timeout") -> "err_timeout"
@@ -549,6 +558,9 @@ object TunnelManager {
                 }
             } finally {
                 val exitedProcess = process
+                if (exitedProcess != null) {
+                    runCatching { exitedProcess.waitFor(300, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                }
                 val exitCode = runCatching { exitedProcess?.exitValue() }.getOrNull()
                 process = null
 

@@ -110,16 +110,6 @@ func main() {
 		}
 	}()
 
-	ppid := os.Getppid()
-	go func() {
-		for {
-			time.Sleep(2 * time.Second)
-			if os.Getppid() != ppid {
-				os.Exit(0)
-			}
-		}
-	}()
-
 	host := flag.String("turn", "", "переопределить IP TURN")
 	port := flag.String("port", "", "переопределить порт TURN")
 	listen := flag.String("listen", "127.0.0.1:9000", "локальный адрес")
