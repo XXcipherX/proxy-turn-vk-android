@@ -73,21 +73,27 @@ class WireGuardHelper(context: Context) {
             }
             builder.parsePrivateKey(parsedConfig.`interface`.keyPair.privateKey.toBase64())
 
-            // Всегда исключаем только WDTT: его Go-клиент должен ходить к TURN снаружи VPN.
-            // 2. Получаю настройки пользователя
+            // WDTT должен ходить к TURN снаружи VPN. В режиме ЧС исключаем его явно;
+            // в режиме БС просто не добавляем WDTT в список разрешённых приложений.
             val settingsStore = SettingsStore(appContext)
             val savedExcluded = settingsStore.excludedApps.first()
-            
+            val isWhitelist = settingsStore.isWhitelist.first()
             val userSelected = savedExcluded.split(",").filter { it.isNotEmpty() }.toSet()
 
-            // В обоих режимах (ЧС и БС) мы технически используем Blacklist (Checked = Excluded),
-            // так как пользователю удобнее логика "снимите галочку, чтобы приложение пошло в туннель".
-            // Разница только в описании и начальном состоянии списка (пустой/полный).
-            val excluded = mutableSetOf(appContext.packageName)
-            excluded.addAll(userSelected)
-            val installedExcluded = excluded.filter { it.isInstalledPackage() }.toSet()
-            if (installedExcluded.isNotEmpty()) {
-                builder.excludeApplications(installedExcluded)
+            if (isWhitelist) {
+                val installedIncluded = userSelected
+                    .filter { it != appContext.packageName && it.isInstalledPackage() }
+                    .toSet()
+                if (installedIncluded.isNotEmpty()) {
+                    builder.includeApplications(installedIncluded)
+                }
+            } else {
+                val excluded = mutableSetOf(appContext.packageName)
+                excluded.addAll(userSelected)
+                val installedExcluded = excluded.filter { it.isInstalledPackage() }.toSet()
+                if (installedExcluded.isNotEmpty()) {
+                    builder.excludeApplications(installedExcluded)
+                }
             }
 
             val newInterface = builder.build()

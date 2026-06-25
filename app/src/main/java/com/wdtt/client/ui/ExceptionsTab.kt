@@ -153,7 +153,7 @@ fun ExceptionsTab() {
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        if (isWhitelist) "БС: Неотмеченные приложения добавляются в туннель"
+                        if (isWhitelist) "БС: Выбранные приложения добавляются в туннель"
                         else "ЧС: Выбранные приложения исключаются из туннеля",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

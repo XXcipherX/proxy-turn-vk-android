@@ -50,6 +50,7 @@ object TunnelManager {
     private var forceRegenerateUA = false // принудительная перегенерация UA при ошибках
     private var currentCaptchaMode = "wv" // режим обхода капчи: "wv" или "rjs"
     private var currentCaptchaSolveMethod = "auto" // "manual" или "auto"
+    private var unexpectedExitCount = 0
 
     @Volatile
     var isLoggingEnabled = true
@@ -157,6 +158,7 @@ object TunnelManager {
                     forceRegenerateUA = false
                     currentCaptchaMode = params.captchaMode
                     currentCaptchaSolveMethod = params.captchaSolveMethod
+                    unexpectedExitCount = 0
                 }
                 
                 wgHelper = WireGuardHelper(appContext)
@@ -546,8 +548,31 @@ object TunnelManager {
                     updateLog("sys_error", "Системная ошибка: ${e.message}", -1, true)
                 }
             } finally {
-                running.value = false
+                val exitedProcess = process
+                val exitCode = runCatching { exitedProcess?.exitValue() }.getOrNull()
                 process = null
+
+                val params = currentParams
+                val context = lastContext
+                if (exitedProcess != null && running.value && params != null && context != null) {
+                    unexpectedExitCount++
+                    activeWorkers.value = 0
+                    val codeText = exitCode?.toString() ?: "unknown"
+                    if (unexpectedExitCount <= 5) {
+                        updateLog("process_exit", "[ПРОЦЕСС] Go завершился (код $codeText), перезапуск $unexpectedExitCount/5", 50, true)
+                        scope.launch {
+                            delay(1500)
+                            if (running.value && process == null) {
+                                start(context, params, isSwitching = true)
+                            }
+                        }
+                    } else {
+                        updateLog("process_exit_fatal", "[ПРОЦЕСС] Go завершился 5 раз подряд, туннель остановлен", -1, true)
+                        running.value = false
+                    }
+                } else {
+                    running.value = false
+                }
             }
         }
     }
