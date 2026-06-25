@@ -460,6 +460,15 @@ object TunnelManager {
                             updateLog("creds_lifetime", lineTrim, 2, false)
                         lineTrim.contains("Креды OK") || lineTrim.contains("Первые креды") ->
                             updateLog("creds_ok", "[ВК] Учетные данные проверены ✓", 2, false)
+                        lineTrim.contains("[VK Auth] Success via VK Calls path") ->
+                            updateLog("vkcalls_success", "[VKCalls] Учетные данные получены ✓", 2, false)
+                        lineTrim.contains("[VKCalls]") -> {
+                            val text = lineTrim.substringAfter("[VKCalls]").trim()
+                            val isVkCallsError = text.contains("error", true) ||
+                                text.contains("ошибка", true) ||
+                                text.contains("failed", true)
+                            updateLog("vkcalls_${text.take(32).hashCode()}", "[VKCalls] $text", 2, isVkCallsError)
+                        }
                         lineTrim.contains("Решаю VK Smart Captcha") ->
                             updateLog("captcha_start", "[КАПЧА] Решение капчи...", 5, false)
                         lineTrim.contains("Smart Captcha решена") ->
@@ -479,9 +488,11 @@ object TunnelManager {
                         }
                         lineTrim.contains("Relay:") ->
                             updateLog("dtls_start", "[DTLS] Рукопожатие (Handshake)...", 1, false)
-                        lineTrim.contains("DTLS ОК") ->
+                        lineTrim.contains("DTLS ОК") || lineTrim.contains("[DTLS] Соединение установлено") ->
                             updateLog("dtls_ok", "[DTLS] Соединение установлено ✓", 1, false)
-                        lineTrim.contains("Активна ✓") ->
+                        lineTrim.contains("Конфиг получен") ->
+                            updateLog("wg_config", "[VPN] WireGuard-конфиг получен", 2, false)
+                        lineTrim.contains("Активна ✓") || lineTrim.contains("[READY] Туннель готов") ->
                             updateLog("ready", "[READY] Туннель готов к работе ✓", 2, false)
                         
                         isError -> {
@@ -514,7 +525,9 @@ object TunnelManager {
                             
                             scope.launch(Dispatchers.Main) {
                                 try {
-                                    wgHelper?.startTunnel(configStr)
+                                    val helper = wgHelper ?: error("WireGuard helper is not initialized")
+                                    helper.startTunnel(configStr)
+                                    updateLog("vpn_started", "[VPN] WireGuard поднят ✓", 2, false)
                                 } catch (e: Exception) {
                                     updateLog("vpn_start_error", "Ошибка запуска VPN: ${e.readableMessage()}", 99, true)
                                 }

@@ -28,6 +28,8 @@ import kotlinx.coroutines.launch
 
 private const val TUNNEL_NOTIFICATION_CHANNEL_ID = "wdtt_tunnel_v4"
 private const val TUNNEL_NOTIFICATION_ID = 1
+private const val WG_FIRST_UP_GRACE_MS = 10_000L
+private const val WG_DOWN_GRACE_MS = 8_000L
 
 class TunnelService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
@@ -286,6 +288,8 @@ class TunnelService : Service() {
             // времени, чем любое фиксированное окно, особенно при ручном обходе капчи, поэтому
             // аварийно глушим туннель только если интерфейс был поднят и затем пропал/заменён.
             var wasEverUp = false
+            var firstUpAtMs = 0L
+            var downSinceMs = 0L
             delay(1000)
             while (isActive) {
                 if (!TunnelManager.running.value && !isTunnelPaused) {
@@ -295,12 +299,22 @@ class TunnelService : Service() {
                 }
                 if (TunnelManager.running.value && !isTunnelPaused) {
                     val helper = WireGuardHelper(applicationContext)
+                    val now = System.currentTimeMillis()
                     if (helper.isTunnelUp()) {
                         wasEverUp = true
+                        if (firstUpAtMs == 0L) {
+                            firstUpAtMs = now
+                        }
+                        downSinceMs = 0L
                     } else if (wasEverUp) {
-                        Log.w("TunnelService", "Обнаружена пропажа или замена VPN-интерфейса! Экстренное выключение туннеля.")
-                        stopTunnel()
-                        break
+                        if (downSinceMs == 0L) {
+                            downSinceMs = now
+                            Log.w("TunnelService", "WireGuard временно не в UP после запуска, ждём стабилизации.")
+                        } else if (now - firstUpAtMs >= WG_FIRST_UP_GRACE_MS && now - downSinceMs >= WG_DOWN_GRACE_MS) {
+                            Log.w("TunnelService", "Обнаружена длительная пропажа или замена VPN-интерфейса! Выключение туннеля.")
+                            stopTunnel()
+                            break
+                        }
                     }
                 }
                 if (!isTunnelPaused) {
