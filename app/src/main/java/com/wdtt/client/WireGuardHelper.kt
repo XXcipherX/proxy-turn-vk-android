@@ -73,7 +73,7 @@ class WireGuardHelper(context: Context) {
             }
             builder.parsePrivateKey(parsedConfig.`interface`.keyPair.privateKey.toBase64())
 
-            // 1. Пакеты, которые всегда исключаются (наше приложение, ВК)
+            // Всегда исключаем только WDTT: его Go-клиент должен ходить к TURN снаружи VPN.
             // 2. Получаю настройки пользователя
             val settingsStore = SettingsStore(appContext)
             val savedExcluded = settingsStore.excludedApps.first()
@@ -83,7 +83,7 @@ class WireGuardHelper(context: Context) {
             // В обоих режимах (ЧС и БС) мы технически используем Blacklist (Checked = Excluded),
             // так как пользователю удобнее логика "снимите галочку, чтобы приложение пошло в туннель".
             // Разница только в описании и начальном состоянии списка (пустой/полный).
-            val excluded = mutableSetOf(appContext.packageName, "com.vkontakte.android", "com.vk.calls")
+            val excluded = mutableSetOf(appContext.packageName)
             excluded.addAll(userSelected)
             val installedExcluded = excluded.filter { it.isInstalledPackage() }.toSet()
             if (installedExcluded.isNotEmpty()) {

@@ -76,9 +76,7 @@ fun ExceptionsTab() {
             val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
 
             installedApps.forEach { app ->
-                if (app.packageName != context.packageName &&
-                    !app.packageName.contains("vkontakte") &&
-                    !app.packageName.contains("vk.calls")) {
+                if (app.packageName != context.packageName) {
                     val isSys = (app.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
                     list.add(AppItem(
                         name = app.loadLabel(pm).toString(),
