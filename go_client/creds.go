@@ -318,6 +318,7 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 
 func getTokenChain(ctx context.Context, link string, streamID int, creds VKCredentials, jar tlsclient.CookieJar) (string, string, []string, error) {
 	profile := getRandomProfile()
+	deviceID := uuid.New().String()
 
 	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
 		tlsclient.WithTimeoutSeconds(20),
@@ -379,7 +380,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 	}
 
 	// Step 1: get_anonym_token
-	data := fmt.Sprintf("client_id=%s&token_type=messages&client_secret=%s&version=1&app_id=%s", creds.ClientID, creds.ClientSecret, creds.ClientID)
+	data := fmt.Sprintf("client_id=%s&token_type=messages&client_secret=%s&version=1&app_id=%s&device_id=%s", creds.ClientID, creds.ClientSecret, creds.ClientID, deviceID)
 	resp, err := doRequest(data, "https://login.vk.ru/?act=get_anonym_token")
 	if err != nil {
 		return "", "", nil, err
@@ -396,7 +397,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 	vkDelayRandom(100, 150)
 
 	// Step 2: getCallPreview (mimics real VK client behavior)
-	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&fields=photo_200&access_token=%s", link, token1)
+	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&fields=photo_200&access_token=%s&device_id=%s", link, token1, deviceID)
 	_, err = doRequest(data, "https://api.vk.ru/method/calls.getCallPreview?v="+vkCallsAPIVersion+"&client_id="+creds.ClientID)
 	if err != nil {
 		log.Printf("[STREAM %d] [VK Auth] Warning: getCallPreview failed: %v", streamID, err)
@@ -405,20 +406,20 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 	vkDelayRandom(200, 400)
 
 	// Step 3: getAnonymousToken (with captcha handling)
-	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s", link, escapedName, token1)
+	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s&device_id=%s", link, escapedName, token1, deviceID)
 	urlAddr := fmt.Sprintf("https://api.vk.ru/method/calls.getAnonymousToken?v=%s&client_id=%s", vkCallsAPIVersion, creds.ClientID)
 	buildCaptchaRetryData := func(captchaErr *VkCaptchaError, successToken string) string {
 		if captchaErr.CaptchaSid == "" {
-			return fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&success_token=%s&access_token=%s",
-				link, escapedName, neturl.QueryEscape(successToken), token1)
+			return fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s&success_token=%s&device_id=%s",
+				link, escapedName, token1, neturl.QueryEscape(successToken), deviceID)
 		}
 
 		captchaAttempt := captchaErr.CaptchaAttempt
 		if captchaAttempt == "0" || captchaAttempt == "" {
 			captchaAttempt = "1"
 		}
-		return fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
-			link, escapedName, captchaErr.CaptchaSid, neturl.QueryEscape(successToken), captchaErr.CaptchaTs, captchaAttempt, token1)
+		return fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s&device_id=%s",
+			link, escapedName, token1, captchaErr.CaptchaSid, neturl.QueryEscape(successToken), captchaErr.CaptchaTs, captchaAttempt, deviceID)
 	}
 
 	var token2 string
