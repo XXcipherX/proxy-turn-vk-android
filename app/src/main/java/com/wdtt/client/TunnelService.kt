@@ -72,6 +72,7 @@ class TunnelService : Service() {
                     sni = intent.getStringExtra("sni") ?: "",
                     connectionPassword = intent.getStringExtra("connection_password") ?: "",
                     protocol = intent.getStringExtra("protocol") ?: "udp",
+                    vkAuthMode = sanitizeVkAuthMode(intent.getStringExtra("vk_auth_mode")),
                     captchaMode = sanitizeCaptchaMode(intent.getStringExtra("captcha_mode")),
                     captchaSolveMethod = intent.getStringExtra("captcha_solve_method") ?: "auto",
                     fingerprint = intent.getStringExtra("fingerprint") ?: "chrome",
@@ -121,6 +122,7 @@ class TunnelService : Service() {
                     port = store.listenPort.first(),
                     sni = store.sni.first(),
                     connectionPassword = store.connectionPassword.first(),
+                    vkAuthMode = sanitizeVkAuthMode(store.vkAuthMode.first()),
                     captchaMode = sanitizeCaptchaMode(store.captchaMode.first()),
                     captchaSolveMethod = store.captchaSolveMethod.first(),
                     fingerprint = store.selectedFingerprint.first(),
@@ -231,6 +233,13 @@ class TunnelService : Service() {
             "rjs" -> "rjs"
             "wv" -> "wv"
             else -> "auto"
+        }
+    }
+
+    private fun sanitizeVkAuthMode(mode: String?): String {
+        return when (mode?.lowercase()) {
+            "legacy" -> "legacy"
+            else -> "vkcalls"
         }
     }
 

@@ -214,6 +214,8 @@ object TunnelManager {
                     cmd.add("-client-ids")
                     cmd.add(params.clientIds)
                 }
+                cmd.add("-vk-auth-mode")
+                cmd.add(params.vkAuthMode)
 
                 val androidId = android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "unknown"
                 cmd.add("-device-id")
@@ -879,6 +881,7 @@ data class TunnelParams(
     val sni: String = "",
     val connectionPassword: String = "",
     val protocol: String = "udp",
+    val vkAuthMode: String = "vkcalls",
     val captchaMode: String = "auto",
     val captchaSolveMethod: String = "auto",
     val fingerprint: String = "chrome",
