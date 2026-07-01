@@ -134,7 +134,23 @@ func solveVkCaptchaV2Attempts(
 	}
 	log.Printf("[КАПЧА] Решаю VK Smart Captcha автоматически (v2, попыток=%d)...", maxAttempts)
 
-	s := &captchaV2Session{ctx: ctx, client: client, profile: profile, savedProfile: savedProfile}
+	captchaProfile := profile
+	if savedProfile != nil {
+		savedProfile.Normalize()
+		if savedProfile.HasCapturedCaptchaProfile() {
+			captchaProfile = savedProfile.CaptchaHTTPProfile(profile)
+			log.Printf(
+				"[КАПЧА] v2 using captured browser profile (device=%dc, browser_fp=%dc, ua=%s)",
+				len(savedProfile.DeviceJSON),
+				len(savedProfile.BrowserFp),
+				captchaProfile.UserAgent,
+			)
+		} else {
+			savedProfile = nil
+		}
+	}
+
+	s := &captchaV2Session{ctx: ctx, client: client, profile: captchaProfile, savedProfile: savedProfile}
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		token, solveErr := s.solveOnce(captchaErr)
@@ -205,6 +221,7 @@ func (s *captchaV2Session) solveOnce(captchaErr *VkCaptchaError) (string, error)
 	}
 	if s.savedProfile != nil && strings.TrimSpace(s.savedProfile.BrowserFp) != "" {
 		browserFP = s.savedProfile.BrowserFp
+		log.Printf("[КАПЧА] v2 using captured browser_fp (%d chars)", len(browserFP))
 	}
 
 	if m := reCaptchaV2Version.FindStringSubmatch(page.ScriptURL); len(m) > 1 {

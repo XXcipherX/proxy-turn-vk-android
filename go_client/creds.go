@@ -419,8 +419,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 	urlAddr := fmt.Sprintf("https://api.vk.ru/method/calls.getAnonymousToken?v=5.275&client_id=%s", creds.ClientID)
 
 	var token2 string
-	var savedProfile *SavedProfile
-	savedProfile, _ = LoadProfileFromDisk()
+	savedProfile := loadSavedCaptchaProfile(streamID)
 
 	for attempt := 0; ; attempt++ {
 		resp, err = doRequest(data, urlAddr)
@@ -596,6 +595,7 @@ func solveCaptchaBySelectedMode(
 	}
 
 	log.Printf("[STREAM %d] [КАПЧА] AUTO: финальная Go v2 попытка после WBV", streamID)
+	savedProfile = loadSavedCaptchaProfile(streamID)
 	token, solveErr = solveVkCaptchaV2Attempts(ctx, captchaErr, client, profile, savedProfile, 1)
 	if solveErr == nil {
 		log.Printf("[STREAM %d] [КАПЧА] AUTO: финальная Go v2 решила капчу", streamID)
@@ -617,6 +617,22 @@ func solveCaptchaBySelectedMode(
 		return "", fmt.Errorf("automatic captcha chain failed: %w; manual fallback failed: %v", lastErr, solveErr)
 	}
 	return "", solveErr
+}
+
+func loadSavedCaptchaProfile(streamID int) *SavedProfile {
+	savedProfile, err := LoadProfileFromDisk()
+	if err != nil || savedProfile == nil {
+		return nil
+	}
+	if savedProfile.HasCapturedCaptchaProfile() {
+		log.Printf(
+			"[STREAM %d] [КАПЧА] captured browser profile loaded (device=%dc, browser_fp=%dc)",
+			streamID,
+			len(savedProfile.DeviceJSON),
+			len(savedProfile.BrowserFp),
+		)
+	}
+	return savedProfile
 }
 
 func requestWebViewCaptcha(streamID int, captchaErr *VkCaptchaError, mode string, timeout time.Duration) (string, error) {

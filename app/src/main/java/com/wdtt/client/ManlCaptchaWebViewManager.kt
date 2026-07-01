@@ -162,11 +162,42 @@ class ManlCaptchaActivity : ComponentActivity() {
             if (window.__wdtt_interceptor_installed) return;
             window.__wdtt_interceptor_installed = true;
 
+            function wdttUrlOf(input) {
+                if (typeof input === 'string') return input;
+                if (input && input.url) return String(input.url);
+                return String(input || '');
+            }
+
+            function wdttCaptureProfile(body, source) {
+                try {
+                    var bodyStr = body ? String(body) : '';
+                    if (!bodyStr) return;
+                    var device = '';
+                    var browserFp = '';
+                    var deviceMatch = /(?:^|&)device=([^&]*)/.exec(bodyStr);
+                    if (deviceMatch && deviceMatch[1]) device = deviceMatch[1];
+                    var fpMatch = /(?:^|&)browser_fp=([^&]*)/.exec(bodyStr);
+                    if (fpMatch && fpMatch[1]) browserFp = fpMatch[1];
+                    if (!device && !browserFp) return;
+                    window.WdttCaptcha.onProfileCapture(
+                        device,
+                        browserFp,
+                        navigator.userAgent || '',
+                        source
+                    );
+                } catch(e) {}
+            }
+
             const origFetch = window.fetch;
             window.fetch = async function() {
                 const args = arguments;
-                const url = args[0] || '';
-                if (typeof url === 'string' && url.includes('captchaNotRobot.check')) {
+                const url = wdttUrlOf(args[0]);
+                const init = args[1] || {};
+                if (url.includes('captchaNotRobot.componentDone')) {
+                    wdttCaptureProfile(init.body, 'fetch-componentDone');
+                }
+                if (url.includes('captchaNotRobot.check')) {
+                    wdttCaptureProfile(init.body, 'fetch-check');
                     const response = await origFetch.apply(this, args);
                     const clone = response.clone();
                     try {
@@ -190,7 +221,11 @@ class ManlCaptchaActivity : ComponentActivity() {
             };
             XMLHttpRequest.prototype.send = function() {
                 const xhr = this;
+                if (xhr._wdtt_url && xhr._wdtt_url.includes('captchaNotRobot.componentDone')) {
+                    wdttCaptureProfile(arguments[0], 'xhr-componentDone');
+                }
                 if (xhr._wdtt_url && xhr._wdtt_url.includes('captchaNotRobot.check')) {
+                    wdttCaptureProfile(arguments[0], 'xhr-check');
                     xhr.addEventListener('load', function() {
                         try {
                             const data = JSON.parse(xhr.responseText);
@@ -309,7 +344,7 @@ class ManlCaptchaActivity : ComponentActivity() {
                                     useWideViewPort = true
                                     blockNetworkLoads = false
                                     cacheMode = WebSettings.LOAD_DEFAULT // Включаем кэш для моментальной загрузки!
-                                    userAgentString = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                                    userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
                                 }
 
                                 addJavascriptInterface(object {
@@ -318,6 +353,10 @@ class ManlCaptchaActivity : ComponentActivity() {
                                         Log.d("ManlCaptchaWV", "Token received")
                                         ManlCaptchaWebViewManager.notifyResult(Result.success(token))
                                         finish()
+                                    }
+                                    @JavascriptInterface
+                                    fun onProfileCapture(device: String, browserFp: String, userAgent: String, source: String) {
+                                        VkCaptchaProfileStore.updateFromCapture(ctx.applicationContext, device, browserFp, userAgent, source)
                                     }
                                     @JavascriptInterface
                                     fun onError(err: String) {
