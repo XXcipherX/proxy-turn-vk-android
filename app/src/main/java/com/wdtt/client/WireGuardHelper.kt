@@ -22,13 +22,21 @@ class WireGuardHelper(context: Context) {
     private val backend = (appContext as WdttApplication).getBackend(context)
 
     private companion object {
+        const val EMPTY_WHITELIST_MESSAGE = "В режиме БС выберите хотя бы одно приложение"
         val wgMutex = Mutex()
         var sharedTunnel: WgTunnel? = null
+        var disabledByEmptyWhitelist = false
     }
 
     class WgTunnel : Tunnel {
         override fun getName() = "wdtt"
         override fun onStateChange(newState: Tunnel.State) {}
+    }
+
+    enum class WatchdogState {
+        UP,
+        DOWN,
+        DISABLED_BY_EMPTY_WHITELIST
     }
 
     suspend fun startTunnel(configString: String) = wgMutex.withLock {
@@ -42,16 +50,6 @@ class WireGuardHelper(context: Context) {
             }
 
             ensureGoBackendServiceStarted()
-
-            sharedTunnel?.let { existingTunnel ->
-                try {
-                    backend.setState(existingTunnel, Tunnel.State.DOWN, null)
-                } catch (e: Exception) {
-                    Log.w("WG", "Failed to stop previous tunnel before restart: ${e.readableMessage()}")
-                }
-                sharedTunnel = null
-                delay(150)
-            }
 
             val parsedConfig = Config.parse(ByteArrayInputStream(configString.toByteArray(Charsets.UTF_8)))
 
@@ -73,22 +71,24 @@ class WireGuardHelper(context: Context) {
             }
             builder.parsePrivateKey(parsedConfig.`interface`.keyPair.privateKey.toBase64())
 
-            // WDTT должен ходить к TURN снаружи VPN. В режиме ЧС исключаем его явно;
-            // в режиме БС просто не добавляем WDTT в список разрешённых приложений.
+            // WDTT and VK calls must stay outside the VPN transport path.
             val settingsStore = SettingsStore(appContext)
+            settingsStore.migrateLegacyWhitelistMode()
             val savedExcluded = settingsStore.excludedApps.first()
             val isWhitelist = settingsStore.isWhitelist.first()
             val userSelected = savedExcluded.split(",").filter { it.isNotEmpty() }.toSet()
+            val transportPackages = setOf(appContext.packageName, "com.vkontakte.android", "com.vk.calls")
 
             if (isWhitelist) {
                 val installedIncluded = userSelected
-                    .filter { it != appContext.packageName && it.isInstalledPackage() }
+                    .filter { it !in transportPackages && it.isInstalledPackage() }
                     .toSet()
-                if (installedIncluded.isNotEmpty()) {
-                    builder.includeApplications(installedIncluded)
+                if (installedIncluded.isEmpty()) {
+                    throw IllegalStateException(EMPTY_WHITELIST_MESSAGE)
                 }
+                builder.includeApplications(installedIncluded)
             } else {
-                val excluded = mutableSetOf(appContext.packageName)
+                val excluded = transportPackages.toMutableSet()
                 excluded.addAll(userSelected)
                 val installedExcluded = excluded.filter { it.isInstalledPackage() }.toSet()
                 if (installedExcluded.isNotEmpty()) {
@@ -115,11 +115,16 @@ class WireGuardHelper(context: Context) {
                 .addPeer(peerBuilder.build())
                 .build()
 
+            disabledByEmptyWhitelist = false
+            stopSharedTunnel("previous tunnel before restart")
             val nextTunnel = WgTunnel()
             setTunnelUpWithRetry(nextTunnel, finalConfig)
             sharedTunnel = nextTunnel
             Log.d("WG", "WireGuard tunnel started successfully")
         } catch (e: Exception) {
+            if (e.isEmptyWhitelistFailure()) {
+                throw e
+            }
             val detailed = "WireGuard start failed: ${e.readableMessage()}; ${configString.describeWireGuardConfig()}"
             Log.e("WG", detailed)
             e.printStackTrace()
@@ -129,26 +134,31 @@ class WireGuardHelper(context: Context) {
 
     suspend fun reloadTunnel() = wgMutex.withLock {
         withContext(Dispatchers.IO) {
-            val currentTunnel = sharedTunnel ?: return@withContext
             try {
                 val configFlow = TunnelManager.config.first() ?: return@withContext
-                backend.setState(currentTunnel, Tunnel.State.DOWN, null)
-                sharedTunnel = null
-                delay(150)
                 startTunnelLocked(configFlow)
                 Log.d("WG", "WireGuard tunnel reloaded for new exceptions")
             } catch (e: Exception) {
-                Log.e("WG", "Failed to reload WireGuard: ${e.readableMessage()}")
+                if (e.isEmptyWhitelistFailure()) {
+                    stopSharedTunnel("empty whitelist")
+                    disabledByEmptyWhitelist = true
+                    Log.d("WG", "WireGuard tunnel disabled for empty whitelist")
+                } else {
+                    Log.e("WG", "Failed to reload WireGuard: ${e.readableMessage()}")
+                }
             }
         }
     }
 
     suspend fun isTunnelUp(): Boolean = wgMutex.withLock {
-        val current = sharedTunnel ?: return false
-        return try {
-            backend.getState(current) == Tunnel.State.UP
-        } catch (e: Exception) {
-            false
+        isSharedTunnelUpLocked()
+    }
+
+    suspend fun watchdogState(): WatchdogState = wgMutex.withLock {
+        when {
+            disabledByEmptyWhitelist -> WatchdogState.DISABLED_BY_EMPTY_WHITELIST
+            isSharedTunnelUpLocked() -> WatchdogState.UP
+            else -> WatchdogState.DOWN
         }
     }
 
@@ -160,6 +170,7 @@ class WireGuardHelper(context: Context) {
                     sharedTunnel = null
                     Log.d("WG", "WireGuard tunnel stopped")
                 }
+                disabledByEmptyWhitelist = false
             } catch (e: Exception) {
                 Log.e("WG", "Failed to stop WireGuard: ${e.readableMessage()}")
             }
@@ -176,6 +187,18 @@ class WireGuardHelper(context: Context) {
             }
         }
         delay(300)
+    }
+
+    private suspend fun stopSharedTunnel(reason: String) {
+        sharedTunnel?.let { existingTunnel ->
+            try {
+                backend.setState(existingTunnel, Tunnel.State.DOWN, null)
+            } catch (e: Exception) {
+                Log.w("WG", "Failed to stop tunnel for $reason: ${e.readableMessage()}")
+            }
+            sharedTunnel = null
+            delay(150)
+        }
     }
 
     private suspend fun setTunnelUpWithRetry(nextTunnel: WgTunnel, finalConfig: Config) {
@@ -198,6 +221,19 @@ class WireGuardHelper(context: Context) {
     private fun Throwable.readableMessage(): String {
         val text = message ?: localizedMessage
         return if (text.isNullOrBlank()) this::class.java.simpleName else "${this::class.java.simpleName}: $text"
+    }
+
+    private fun Throwable.isEmptyWhitelistFailure(): Boolean {
+        return message?.contains(EMPTY_WHITELIST_MESSAGE) == true
+    }
+
+    private fun isSharedTunnelUpLocked(): Boolean {
+        val current = sharedTunnel ?: return false
+        return try {
+            backend.getState(current) == Tunnel.State.UP
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun String.isInstalledPackage(): Boolean {

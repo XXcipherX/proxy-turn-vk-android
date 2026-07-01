@@ -309,20 +309,28 @@ class TunnelService : Service() {
                 if (TunnelManager.running.value && !isTunnelPaused) {
                     val helper = WireGuardHelper(applicationContext)
                     val now = System.currentTimeMillis()
-                    if (helper.isTunnelUp()) {
-                        wasEverUp = true
-                        if (firstUpAtMs == 0L) {
-                            firstUpAtMs = now
+                    when (helper.watchdogState()) {
+                        WireGuardHelper.WatchdogState.UP -> {
+                            wasEverUp = true
+                            if (firstUpAtMs == 0L) {
+                                firstUpAtMs = now
+                            }
+                            downSinceMs = 0L
                         }
-                        downSinceMs = 0L
-                    } else if (wasEverUp) {
-                        if (downSinceMs == 0L) {
-                            downSinceMs = now
-                            Log.w("TunnelService", "WireGuard временно не в UP после запуска, ждём стабилизации.")
-                        } else if (now - firstUpAtMs >= WG_FIRST_UP_GRACE_MS && now - downSinceMs >= WG_DOWN_GRACE_MS) {
-                            Log.w("TunnelService", "Обнаружена длительная пропажа или замена VPN-интерфейса! Выключение туннеля.")
-                            stopTunnel()
-                            break
+                        WireGuardHelper.WatchdogState.DISABLED_BY_EMPTY_WHITELIST -> {
+                            downSinceMs = 0L
+                        }
+                        WireGuardHelper.WatchdogState.DOWN -> {
+                            if (wasEverUp) {
+                                if (downSinceMs == 0L) {
+                                    downSinceMs = now
+                                    Log.w("TunnelService", "WireGuard временно не в UP после запуска, ждём стабилизации.")
+                                } else if (now - firstUpAtMs >= WG_FIRST_UP_GRACE_MS && now - downSinceMs >= WG_DOWN_GRACE_MS) {
+                                    Log.w("TunnelService", "Обнаружена длительная пропажа или замена VPN-интерфейса! Выключение туннеля.")
+                                    stopTunnel()
+                                    break
+                                }
+                            }
                         }
                     }
                 }
