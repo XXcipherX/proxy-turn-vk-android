@@ -5,6 +5,29 @@ on:
     branches:
       - "**"
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Release tag. Empty = v<versionName>-<run number>
+        required: false
+        type: string
+      release_name:
+        description: Release title. Empty = WDTT <versionName> (<tag>)
+        required: false
+        type: string
+      changelog:
+        description: Optional Markdown changelog. Empty = generated from git log
+        required: false
+        type: string
+      draft:
+        description: Create as draft release
+        required: true
+        type: boolean
+        default: false
+      prerelease:
+        description: Mark release as prerelease
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   build-release:
@@ -12,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: read
+      contents: write
 
     env:
       ANDROID_MIN_API: "29"
@@ -24,6 +47,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -275,11 +300,120 @@ jobs:
           echo "== Final artifacts =="
           find build/artifacts -type f -exec ls -lh {} \;
 
+      - name: Prepare release APK files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p build/release-assets
+
+          shopt -s nullglob
+          signed_apks=(build/artifacts/apk/*-signed.apk)
+
+          if [ ${#signed_apks[@]} -eq 0 ]; then
+            echo "No signed APKs found"
+            find build/artifacts/apk -type f -name "*.apk" -print || true
+            exit 1
+          fi
+
+          for apk in "${signed_apks[@]}"; do
+            base="$(basename "$apk")"
+            case "$base" in
+              app-arm64-v8a-release-signed.apk) out="WDTT-arm64-v8a.apk" ;;
+              app-armeabi-v7a-release-signed.apk) out="WDTT-armeabi-v7a.apk" ;;
+              app-universal-release-signed.apk) out="WDTT-universal.apk" ;;
+              app-x86_64-release-signed.apk) out="WDTT-x86_64.apk" ;;
+              *) out="${base%-signed.apk}.apk" ;;
+            esac
+
+            cp "$apk" "build/release-assets/$out"
+          done
+
+          cd build/release-assets
+          sha256sum *.apk > SHA256SUMS.txt
+          ls -lh
+
+      - name: Prepare release changelog
+        id: release_meta
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          INPUT_TAG_NAME: ${{ inputs.tag_name }}
+          INPUT_RELEASE_NAME: ${{ inputs.release_name }}
+          INPUT_CHANGELOG: ${{ inputs.changelog }}
+        run: |
+          set -euo pipefail
+
+          version_name="$(grep -E 'versionName = ' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          version_code="$(grep -E 'versionCode = ' app/build.gradle.kts | head -n 1 | sed -E 's/.*= *([0-9]+).*/\1/')"
+
+          tag="${INPUT_TAG_NAME:-v${version_name}-${GITHUB_RUN_NUMBER}}"
+          release_name="${INPUT_RELEASE_NAME:-WDTT ${version_name} (${tag})}"
+
+          if ! [[ "$tag" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid release tag: $tag"
+            echo "Use only letters, digits, dot, underscore, dash and slash."
+            exit 1
+          fi
+
+          previous_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+
+          if [ -n "$INPUT_CHANGELOG" ]; then
+            changelog="$INPUT_CHANGELOG"
+          elif [ -n "$previous_tag" ]; then
+            changelog="$(git log --pretty=format:'- %s (%h)' "${previous_tag}..HEAD")"
+          else
+            changelog="$(git log -n 30 --pretty=format:'- %s (%h)')"
+          fi
+
+          if [ -z "$changelog" ]; then
+            changelog="- Release build from ${GITHUB_SHA::7}"
+          fi
+
+          {
+            echo "# $release_name"
+            echo
+            echo "- Version: \`${version_name}\`"
+            echo "- Version code: \`${version_code}\`"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo
+            echo "## Changelog"
+            echo
+            printf '%s\n' "$changelog"
+            echo
+            echo "## SHA256"
+            echo
+            echo '```'
+            cat build/release-assets/SHA256SUMS.txt
+            echo '```'
+          } > build/release-notes.md
+
+          {
+            echo "tag_name=$tag"
+            echo "release_name=$release_name"
+          } >> "$GITHUB_OUTPUT"
+
+          cat build/release-notes.md
+
+      - name: Publish GitHub release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag_name }}
+          name: ${{ steps.release_meta.outputs.release_name }}
+          body_path: build/release-notes.md
+          target_commitish: ${{ github.sha }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          files: build/release-assets/*
+          fail_on_unmatched_files: true
+          overwrite_files: true
+
       - name: Upload release APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: WDTT-release-apk
-          path: build/artifacts/apk/*.apk
+          path: build/release-assets/*
           if-no-files-found: error
           retention-days: 14
 
