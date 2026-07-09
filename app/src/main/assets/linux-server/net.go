@@ -337,7 +337,13 @@ func startUserspaceWG(keys *wgKeys, wgPort int) (*device.Device, error) {
 	}
 
 	go func() {
-		uapi, err := ipc.UAPIListen(ifaceName)
+		uapiFile, err := ipc.UAPIOpen(ifaceName)
+		if err != nil {
+			return
+		}
+		defer uapiFile.Close()
+
+		uapi, err := ipc.UAPIListen(ifaceName, uapiFile)
 		if err != nil {
 			return
 		}
