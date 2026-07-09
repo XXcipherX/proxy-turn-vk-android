@@ -1,0 +1,9 @@
+*
+!Dockerfile
+!LICENSE
+!app/
+!app/src/
+!app/src/main/
+!app/src/main/assets/
+!app/src/main/assets/linux-server/
+!app/src/main/assets/linux-server/**
