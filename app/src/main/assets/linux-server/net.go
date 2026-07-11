@@ -71,8 +71,11 @@ var (
 func statsLoop(ctx context.Context, configDir string) {
 	serverStartTime = time.Now()
 	statsFile := filepath.Join(configDir, "server.log")
-	ticker := time.NewTicker(10 * time.Second)
+
+	// интервал с 10 секунд на 1 минуту, чтобы снизить нагрузку на диск и процессор
+	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -84,13 +87,6 @@ func statsLoop(ctx context.Context, configDir string) {
 			total := atomic.LoadInt64(&totalConns)
 			uptime := time.Since(serverStartTime)
 
-			log.Printf("[СТАТ] Активных: %d | Всего: %d | NAT: %s | ↑%.2f МБ | ↓%.2f МБ",
-				active, total, natType,
-				float64(fromC)/1024/1024,
-				float64(toC)/1024/1024,
-			)
-
-			
 			dbMutex.Lock()
 			numPasswords := len(db.Passwords)
 			numDevices := len(db.Devices)
@@ -99,6 +95,9 @@ func statsLoop(ctx context.Context, configDir string) {
 			uptimeStr := formatUptime(uptime)
 			downGB := float64(toC) / (1024 * 1024 * 1024)
 			upGB := float64(fromC) / (1024 * 1024 * 1024)
+
+			log.Printf("[СТАТ] Активных: %d | Всего соединений: %d | Uptime: %s | Получено: %.2f GB | Отправлено: %.2f GB | Паролей: %d | Устройств: %d",
+				active, total, uptimeStr, downGB, upGB, numPasswords, numDevices)
 
 			statsJSON, _ := json.Marshal(map[string]interface{}{
 				"active":    active,
@@ -393,6 +392,9 @@ PersistentKeepalive = %d`,
 }
 
 func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
+	// Добавлен defer для предотвращения утечки сокетов при ошибках на любом этапе функции
+	defer clientConn.Close()
+
 	atomic.AddInt64(&totalConns, 1)
 
 	var connPassword string
@@ -441,7 +443,6 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 
 		dbMutex.Lock()
 
-		
 		isMainPass := password != "" && password == db.MainPassword
 		entry, isGenPass := db.Passwords[password]
 		valid := isMainPass || (isGenPass && !isPasswordExpired(entry))
@@ -451,7 +452,6 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			log.Printf("[WG] Отказ: пароль %s деактивирован, запрос от %s", maskPassword(password), deviceID)
 			dbMutex.Unlock()
 		} else if valid && isGenPass && entry.DeviceID != "" && entry.DeviceID != deviceID {
-			
 			clientConn.Write([]byte("DENIED:device_mismatch"))
 			log.Printf("[WG] Отказ: пароль %s привязан к %s, запрос от %s", maskPassword(password), entry.DeviceID, deviceID)
 			dbMutex.Unlock()
@@ -459,7 +459,6 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			connPassword = password
 			connIsMainPass = isMainPass
 
-			
 			if isGenPass && entry.DeviceID == "" {
 				entry.DeviceID = deviceID
 				saveDB()
@@ -519,7 +518,6 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		firstPacket = buf[:n]
 	}
 
-	
 	wgConn, err := net.Dial("udp", wgEndpoint)
 	if err != nil {
 		return
@@ -544,22 +542,74 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		wgConn.SetDeadline(time.Now())
 	})
 
+	var localUpBytes int64
+	var localDownBytes int64
+
+	flushStats := func() bool {
+		up := atomic.SwapInt64(&localUpBytes, 0)
+		down := atomic.SwapInt64(&localDownBytes, 0)
+
+		dbMutex.Lock()
+		defer dbMutex.Unlock()
+
+		e, ok := db.Passwords[connPassword]
+		if !ok || e == nil || isPasswordExpired(e) || e.IsDeactivated {
+			return false
+		}
+
+		e.UpBytes += up
+		e.DownBytes += down
+		return true
+	}
+
 	var proxyWg sync.WaitGroup
 	proxyWg.Add(2)
 
-	
+	if connPassword != "" && !connIsMainPass {
+		proxyWg.Add(1)
+		go func() {
+			defer proxyWg.Done()
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-pctx.Done():
+					flushStats()
+					return
+				case <-ticker.C:
+					if !flushStats() {
+						pcancel()
+						return
+					}
+				}
+			}
+		}()
+	}
+
+// Направление: Клиент -> WireGuard (Upload)
 	go func() {
 		defer proxyWg.Done()
 		defer pcancel()
 		b := getBuf()
 		defer putBuf(b)
+
+		var lastDeadlineUpdate time.Time
+
 		for {
 			select {
 			case <-pctx.Done():
 				return
 			default:
 			}
-			clientConn.SetReadDeadline(time.Now().Add(30 * time.Minute))
+
+			// Вызываем дедлайн только раз в 15 секунд, а не на каждый пакет
+			now := time.Now()
+			if now.Sub(lastDeadlineUpdate) > 15*time.Second {
+				clientConn.SetReadDeadline(now.Add(30 * time.Minute))
+				lastDeadlineUpdate = now
+			}
+
 			nn, err := clientConn.Read(*b)
 			if err != nil {
 				return
@@ -571,34 +621,38 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			atomic.AddInt64(&totalBytesFromClient, int64(nn))
 			
 			if connPassword != "" && !connIsMainPass {
-				dbMutex.Lock()
-				e, ok := db.Passwords[connPassword]
-				if !ok || e == nil || isPasswordExpired(e) || e.IsDeactivated {
-					dbMutex.Unlock()
-					return
-				}
-				e.UpBytes += int64(nn)
-				dbMutex.Unlock()
+				atomic.AddInt64(&localUpBytes, int64(nn))
 			}
+
 			if _, err := wgConn.Write((*b)[:nn]); err != nil {
 				return
 			}
 		}
 	}()
 
-	
+// Направление: WireGuard -> Клиент (Download)
 	go func() {
 		defer proxyWg.Done()
 		defer pcancel()
 		b := getBuf()
 		defer putBuf(b)
+
+		var lastDeadlineUpdate time.Time
+
 		for {
 			select {
 			case <-pctx.Done():
 				return
 			default:
 			}
-			wgConn.SetReadDeadline(time.Now().Add(30 * time.Minute))
+
+			// Вызываем дедлайн только раз в 15 секунд
+			now := time.Now()
+			if now.Sub(lastDeadlineUpdate) > 15*time.Second {
+				wgConn.SetReadDeadline(now.Add(30 * time.Minute))
+				lastDeadlineUpdate = now
+			}
+
 			nn, err := wgConn.Read(*b)
 			if err != nil {
 				if isNetTimeout(err) {
@@ -612,15 +666,9 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			atomic.AddInt64(&totalBytesToClient, int64(nn))
 			
 			if connPassword != "" && !connIsMainPass {
-				dbMutex.Lock()
-				e, ok := db.Passwords[connPassword]
-				if !ok || e == nil || isPasswordExpired(e) || e.IsDeactivated {
-					dbMutex.Unlock()
-					return
-				}
-				e.DownBytes += int64(nn)
-				dbMutex.Unlock()
+				atomic.AddInt64(&localDownBytes, int64(nn))
 			}
+
 			if _, err := clientConn.Write((*b)[:nn]); err != nil {
 				return
 			}
@@ -628,4 +676,9 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 	}()
 
 	proxyWg.Wait()
+
+	// Добавлен финальный сброс статистики после завершения работы всех прокси-горутин
+	if connPassword != "" && !connIsMainPass {
+		flushStats()
+	}
 }

@@ -1,5 +1,3 @@
-
-
 package main
 
 import (
@@ -28,6 +26,14 @@ const (
 
 var aeadCache sync.Map
 
+// Локальный пул буферов для чтения, чтобы не аллоцировать память на каждый пакет
+var obfsBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 2048)
+		return &b
+	},
+}
+
 func getAEAD(key []byte) (cipher.AEAD, error) {
 	if len(key) != wrapKeyLen {
 		return nil, fmt.Errorf("obfs: key must be %d bytes", wrapKeyLen)
@@ -51,15 +57,14 @@ type ObfsConfig struct {
 }
 
 type ObfsState struct {
-	mu      sync.Mutex
 	initSeq uint16
 	initTs  uint32
-	count   uint64
+	count   uint64 // Поле обновляется атомарно через sync/atomic
 }
 
 func NewObfsConfig() *ObfsConfig {
 	var buf [4]byte
-	rand.Read(buf[:])
+	_, _ = rand.Read(buf[:])
 	return &ObfsConfig{
 		SSRC:        binary.BigEndian.Uint32(buf[:]),
 		PayloadType: 111,
@@ -69,7 +74,7 @@ func NewObfsConfig() *ObfsConfig {
 
 func NewObfsState() *ObfsState {
 	var buf [6]byte
-	rand.Read(buf[:])
+	_, _ = rand.Read(buf[:])
 	return &ObfsState{
 		initSeq: binary.BigEndian.Uint16(buf[0:2]),
 		initTs:  binary.BigEndian.Uint32(buf[2:6]),
@@ -101,23 +106,30 @@ func obfsWrapWireLen(payloadLen int, cfg *ObfsConfig) int {
 	return 12 + payloadLen + chacha20poly1305.Overhead + pad
 }
 
+func obfsMix64(v uint64) uint64 {
+	x := (v + 0x9e3779b97f4a7c15) ^ 0xbf58476d1ce4e5b9
+	x ^= x >> 30
+	x *= 0xbf58476d1ce4e5b9
+	x ^= x >> 27
+	x *= 0x94d049bb133111eb
+	x ^= x >> 31
+	return x
+}
+
 func obfsWrapPacketInto(dst []byte, aead cipher.AEAD, payload []byte, cfg *ObfsConfig, state *ObfsState) (int, error) {
 	if len(payload) == 0 {
 		return 0, errors.New("obfs: empty payload")
 	}
-	state.mu.Lock()
-	c := state.count
-	state.count++
-	state.mu.Unlock()
 
+	c := atomic.AddUint64(&state.count, 1) - 1
 	seq := state.initSeq + uint16(c)
 	ts := state.initTs + uint32(c)*960 + uint32(c>>16)
 
 	padRand := 0
+	x := uint64(0)
 	if cfg.PaddingMax > 0 {
-		var rndBuf [1]byte
-		rand.Read(rndBuf[:])
-		padRand = int(rndBuf[0]) % cfg.PaddingMax
+		x = obfsMix64(c)
+		padRand = int(x % uint64(cfg.PaddingMax))
 	}
 	padTotal := padRand + 1
 	outLen := 12 + len(payload) + chacha20poly1305.Overhead + padTotal
@@ -135,8 +147,11 @@ func obfsWrapPacketInto(dst []byte, aead cipher.AEAD, payload []byte, cfg *ObfsC
 	obfsBuildNonceInto(&nonce, cfg.SSRC, seq, ts)
 	sealed := aead.Seal(dst[12:12], nonce[:], payload, dst[:12])
 	padStart := 12 + len(sealed)
+
 	if padRand > 0 {
-		rand.Read(dst[padStart : padStart+padRand])
+		for i := 0; i < padRand; i++ {
+			dst[padStart+i] = byte(x >> ((i % 8) * 8))
+		}
 	}
 	dst[outLen-1] = byte(padTotal)
 	return outLen, nil
@@ -249,51 +264,44 @@ type wrapPacketConn struct {
 	inner     net.PacketConn
 	keys      *wrapKeyStore
 	key       []byte
-	aead      cipher.AEAD 
+	aead      cipher.AEAD
 	selected  int32
 	authLog   int32
 	obfsCfg   *ObfsConfig
 	obfsWrite *ObfsState
 
-	
-	
-	
-	
 	rxMu  sync.Mutex
-	rxBuf []byte
 	txMu  sync.Mutex
 	txBuf []byte
 }
 
 func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	c.rxMu.Lock()
-	defer c.rxMu.Unlock()
-
-	
-	need := len(p) + 80
-	if cap(c.rxBuf) < need {
-		c.rxBuf = make([]byte, need)
-	}
-	buf := c.rxBuf[:need]
+	// Получаем буфер из пула во временное пользование (вне мьютекса!)
+	bufPtr := obfsBufPool.Get().(*[]byte)
+	defer obfsBufPool.Put(bufPtr)
+	buf := *bufPtr
 
 	var n int
 	var addr net.Addr
 	var err error
-	var raw []byte
 
+	// Сетевое чтение происходит без блокировки rxMu
 	for {
 		n, addr, err = c.inner.ReadFrom(buf)
 		if err != nil {
 			return 0, addr, err
 		}
-		raw = buf[:n]
-
-		
-		if len(raw) > 0 && (raw[0] == 0x00 || raw[0] == 0x16) {
-			continue 
+		if n > 0 && (buf[0] == 0x00 || buf[0] == 0x16) {
+			continue
 		}
 		break
 	}
+
+	raw := buf[:n]
+
+	// Блокируем только на короткие вычисления
+	c.rxMu.Lock()
+	defer c.rxMu.Unlock()
 
 	if atomic.LoadInt32(&c.selected) == 0 {
 		key, m, uErr := c.keys.Unwrap(raw, p)
@@ -310,7 +318,7 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		c.key = key
 		c.aead = aead
 		c.obfsCfg = NewObfsConfig()
-		
+
 		if len(raw) > 1 {
 			c.obfsCfg.PayloadType = raw[1] & 0x7F
 		}
