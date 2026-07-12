@@ -1,5 +1,3 @@
-
-
 package main
 
 import (
@@ -19,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/hkdf"
@@ -43,6 +42,13 @@ func generatePassword() string {
 }
 
 var publicIP string = ""
+
+var (
+	dbDirty     int32
+	dbSaveTimer *time.Timer
+	dbSaveMu    sync.Mutex
+	dbWriteMu   sync.Mutex
+)
 
 func getPublicIP() string {
 	if publicIP != "" {
@@ -152,7 +158,9 @@ func (s *wrapKeyStore) SetPasswords(mainPassword string, generated []string) err
 	s.entries = next
 	s.mu.Unlock()
 	for _, entry := range old {
-		aeadCache.Delete(string(entry.key))
+		aeadCacheMu.Lock()
+		delete(aeadCache, string(entry.key))
+		aeadCacheMu.Unlock()
 		zeroBytes(entry.key)
 	}
 	return nil
@@ -186,7 +194,9 @@ func (s *wrapKeyStore) RemovePassword(password string) {
 		if entry.id != id {
 			continue
 		}
-		aeadCache.Delete(string(entry.key))
+		aeadCacheMu.Lock()
+		delete(aeadCache, string(entry.key))
+		aeadCacheMu.Unlock()
 		zeroBytes(entry.key)
 		copy(s.entries[i:], s.entries[i+1:])
 		s.entries[len(s.entries)-1] = wrapKeyEntry{}
@@ -249,15 +259,67 @@ func initDB(dir, mainPass, adminID, botToken string) {
 	db.MainPassword = mainPass
 	db.AdminID = adminID
 	db.BotToken = botToken
-	saveDB()
+	if err := saveDBSync(); err != nil {
+		log.Printf("[DB] initial save: %v", err)
+	}
 	if err := refreshWrapKeysFromDBLocked(); err != nil {
 		log.Fatalf("[WRAP] init keys: %v", err)
 	}
 }
 
-func saveDB() {
-	data, _ := json.MarshalIndent(db, "", "  ")
-	os.WriteFile(dbFile, data, 0600)
+func saveDBLazy() {
+	atomic.StoreInt32(&dbDirty, 1)
+
+	dbSaveMu.Lock()
+	if dbSaveTimer == nil {
+		dbSaveTimer = time.AfterFunc(5*time.Second, func() {
+			dbSaveMu.Lock()
+			dbSaveTimer = nil
+			dbSaveMu.Unlock()
+
+			if atomic.SwapInt32(&dbDirty, 0) == 1 {
+				if err := saveDBSync(); err != nil {
+					log.Printf("[DB] delayed save: %v", err)
+				}
+			}
+		})
+	}
+	dbSaveMu.Unlock()
+}
+
+func flushDB() {
+	dbSaveMu.Lock()
+	timer := dbSaveTimer
+	dbSaveTimer = nil
+	dbSaveMu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
+	atomic.StoreInt32(&dbDirty, 0)
+	if err := saveDBSync(); err != nil {
+		log.Printf("[DB] final save: %v", err)
+	}
+}
+
+func saveDBSync() error {
+	dbWriteMu.Lock()
+	defer dbWriteMu.Unlock()
+
+	dbMutex.RLock()
+	data, err := json.Marshal(db)
+	dbMutex.RUnlock()
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	tmp := dbFile + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := os.Rename(tmp, dbFile); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace database: %w", err)
+	}
+	return nil
 }
 
 func isPasswordExpired(entry *PasswordEntry) bool {
@@ -265,7 +327,7 @@ func isPasswordExpired(entry *PasswordEntry) bool {
 		return true
 	}
 	if entry.ExpiresAt == 0 {
-		return false 
+		return false
 	}
 	return time.Now().Unix() > entry.ExpiresAt
 }
@@ -293,7 +355,6 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 		return
 	}
 
-	
 	go func() {
 		cmds := `{"commands":[{"command":"start","description":"Главное меню"},{"command":"new","description":"Создать временный пароль"},{"command":"list","description":"Управление доступами"}]}`
 		resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/setMyCommands", token), "application/json", strings.NewReader(cmds))
@@ -305,14 +366,13 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 	offset := 0
 	client := &http.Client{Timeout: 65 * time.Second}
 
-	
 	var waitingForDays bool
 	var waitingForPorts bool
 	var waitingForHash bool
 	var targetPassword string
 
 	var tempDays int
-	var tempPorts string 
+	var tempPorts string
 
 	for {
 		url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?timeout=60&offset=%d", token, offset)
@@ -355,13 +415,12 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 		for _, u := range res.Result {
 			offset = u.UpdateID + 1
 
-			
 			if u.CallbackQuery != nil && u.CallbackQuery.Message.Chat.ID == adminID {
 				data := u.CallbackQuery.Data
 				answerCallback(token, u.CallbackQuery.ID)
 
 				if strings.HasPrefix(data, "viewpass_") {
-					
+
 					pass := strings.TrimPrefix(data, "viewpass_")
 					dbMutex.Lock()
 					entry, exists := db.Passwords[pass]
@@ -447,7 +506,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					entry, exists := db.Passwords[pass]
 					if exists && entry != nil {
 						entry.IsDeactivated = true
-						
+
 						if entry.DeviceID != "" {
 							if dev, devExists := db.Devices[entry.DeviceID]; devExists {
 								if pubHex, err := b64ToHex(dev.PubKey); err == nil && pubHex != "" {
@@ -455,7 +514,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 								}
 							}
 						}
-						saveDB()
+						saveDBLazy()
 					}
 					dbMutex.Unlock()
 					sendTelegram(token, adminID, fmt.Sprintf("⏸ Пароль `%s` деактивирован", pass), nil)
@@ -466,7 +525,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					entry, exists := db.Passwords[pass]
 					if exists && entry != nil {
 						entry.IsDeactivated = false
-						saveDB()
+						saveDBLazy()
 					}
 					dbMutex.Unlock()
 					sendTelegram(token, adminID, fmt.Sprintf("✅ Пароль `%s` активирован", pass), nil)
@@ -485,7 +544,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					dbMutex.Lock()
 					entry, exists := db.Passwords[pass]
 					if exists && entry != nil && entry.DeviceID != "" {
-						
+
 						dev, devExists := db.Devices[entry.DeviceID]
 						if devExists {
 							pubHex, _ := b64ToHex(dev.PubKey)
@@ -493,7 +552,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 							delete(db.Devices, entry.DeviceID)
 						}
 						entry.DeviceID = ""
-						saveDB()
+						saveDBLazy()
 					}
 					dbMutex.Unlock()
 					sendTelegram(token, adminID, fmt.Sprintf("✅ Устройство отвязано от пароля `%s`", pass), nil)
@@ -512,7 +571,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					}
 					delete(db.Passwords, pass)
 					serverWrapKeys.RemovePassword(pass)
-					saveDB()
+					saveDBLazy()
 					dbMutex.Unlock()
 					sendTelegram(token, adminID, fmt.Sprintf("✅ Пароль `%s` и его устройство удалены", pass), nil)
 
@@ -524,13 +583,13 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 						delete(db.Devices, devID)
 						pubHex, _ := b64ToHex(dev.PubKey)
 						wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-						
+
 						for _, entry := range db.Passwords {
 							if entry != nil && entry.DeviceID == devID {
 								entry.DeviceID = ""
 							}
 						}
-						saveDB()
+						saveDBLazy()
 					}
 					dbMutex.Unlock()
 					sendTelegram(token, adminID, fmt.Sprintf("✅ Устройство `%s` удалено", devID), nil)
@@ -547,7 +606,6 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 				}
 			}
 
-			
 			msg := u.Message
 			if msg == nil || msg.Chat.ID != adminID {
 				continue
@@ -555,7 +613,6 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 
 			cmd := strings.TrimSpace(msg.Text)
 
-			
 			if waitingForDays {
 				waitingForDays = false
 				days, parseErr := strconv.Atoi(cmd)
@@ -627,7 +684,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 
 				dbMutex.Lock()
 				if cleanupExpiredPasswordsLocked(wgDev) > 0 {
-					saveDB()
+					saveDBLazy()
 				}
 				if len(db.Passwords) >= maxGeneratedPasswords {
 					dbMutex.Unlock()
@@ -658,7 +715,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					VkHash:    hash,
 					Ports:     tempPorts,
 				}
-				saveDB()
+				saveDBLazy()
 				dbMutex.Unlock()
 
 				expDate := time.Unix(expiresAt, 0).Format("02.01.2006")
@@ -676,7 +733,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 			} else if cmd == "/new" {
 				dbMutex.Lock()
 				if cleanupExpiredPasswordsLocked(wgDev) > 0 {
-					saveDB()
+					saveDBLazy()
 				}
 				if len(db.Passwords) >= maxGeneratedPasswords {
 					dbMutex.Unlock()
@@ -737,7 +794,7 @@ func cleanupExpiredPasswords(wgDev *device.Device) int {
 	defer dbMutex.Unlock()
 	removed := cleanupExpiredPasswordsLocked(wgDev)
 	if removed > 0 {
-		saveDB()
+		saveDBLazy()
 	}
 	return removed
 }
@@ -774,9 +831,8 @@ func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
 
-	
 	if cleanupExpiredPasswordsLocked(wgDev) > 0 {
-		saveDB()
+		saveDBLazy()
 	}
 
 	txt := "🔐 *Пароли:*\n\n"

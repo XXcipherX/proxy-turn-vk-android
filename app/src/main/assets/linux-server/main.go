@@ -47,6 +47,7 @@ func main() {
 		<-sig
 		cancel()
 		time.Sleep(2 * time.Second)
+		flushDB()
 		os.Exit(0)
 	}()
 

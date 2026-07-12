@@ -1,5 +1,3 @@
-
-
 package main
 
 import (
@@ -25,12 +23,12 @@ type ClientDevice struct {
 }
 
 type PasswordEntry struct {
-	DeviceID      string `json:"device_id"`  
-	ExpiresAt     int64  `json:"expires_at"` 
-	DownBytes     int64  `json:"down_bytes"` 
-	UpBytes       int64  `json:"up_bytes"`   
+	DeviceID      string `json:"device_id"`
+	ExpiresAt     int64  `json:"expires_at"`
+	DownBytes     int64  `json:"down_bytes"`
+	UpBytes       int64  `json:"up_bytes"`
 	VkHash        string `json:"vk_hash,omitempty"`
-	Ports         string `json:"ports,omitempty"` 
+	Ports         string `json:"ports,omitempty"`
 	IsDeactivated bool   `json:"is_deactivated,omitempty"`
 }
 
@@ -44,7 +42,7 @@ type Database struct {
 
 var (
 	db      *Database
-	dbMutex sync.Mutex
+	dbMutex sync.RWMutex // Изменено на RWMutex для параллельного чтения данных
 	dbFile  string
 )
 
