@@ -1,0 +1,169 @@
+name: Build WDTT Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Release tag. Empty = v<version>-<run number>
+        required: false
+        type: string
+      release_name:
+        description: Release title. Empty = WDTT <version> (<tag>)
+        required: false
+        type: string
+      changelog:
+        description: Optional Markdown changelog
+        required: false
+        type: string
+      draft:
+        description: Create as draft release
+        required: true
+        default: false
+        type: boolean
+      prerelease:
+        description: Mark release as prerelease
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  build-release:
+    name: Build release APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    env:
+      ANDROID_MIN_API: "28"
+      ANDROID_COMPILE_SDK: "35"
+      ANDROID_BUILD_TOOLS: "35.0.0"
+      ANDROID_NDK_VERSION: "27.2.12479018"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-${ANDROID_COMPILE_SDK}" "build-tools;${ANDROID_BUILD_TOOLS}" "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+          cache-dependency-path: |
+            app/src/main/assets/android-client/go.sum
+            app/src/main/assets/linux-server/go.sum
+
+      - name: Build native components
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/build_server.sh scripts/build-go-lib.sh scripts/build_client.sh gradlew
+          (cd app/src/main/assets/linux-server && go mod download)
+          scripts/build_server.sh
+          scripts/build_client.sh
+
+      - name: Generate temporary release keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          keytool -genkeypair -v -keystore release.keystore -storetype PKCS12 \
+            -storepass wdtt_temp_release_password -keypass wdtt_temp_release_password \
+            -alias wdtt-release -keyalg RSA -keysize 4096 -validity 10000 \
+            -dname "CN=WDTT,O=WDTT,C=LV"
+          cat > local.properties <<'EOF'
+          KEYSTORE_FILE=../release.keystore
+          KEYSTORE_PASSWORD=wdtt_temp_release_password
+          KEY_ALIAS=wdtt-release
+          KEY_PASSWORD=wdtt_temp_release_password
+          EOF
+
+      - name: Build Android release APKs
+        shell: bash
+        run: ./gradlew clean :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Prepare release assets and changelog
+        id: release_meta
+        shell: bash
+        env:
+          INPUT_TAG_NAME: ${{ inputs.tag_name }}
+          INPUT_RELEASE_NAME: ${{ inputs.release_name }}
+          INPUT_CHANGELOG: ${{ inputs.changelog }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/release-assets build/go-client build/server
+          mapfile -t apks < <(find app/build/outputs/apk -type f -name '*.apk' | sort)
+          if [ "${#apks[@]}" -eq 0 ]; then
+            echo "No release APKs were generated"
+            exit 1
+          fi
+          for apk in "${apks[@]}"; do
+            case "$(basename "$apk")" in
+              *arm64-v8a*) output="WDTT-arm64-v8a.apk" ;;
+              *armeabi-v7a*) output="WDTT-armeabi-v7a.apk" ;;
+              *x86_64*) output="WDTT-x86_64.apk" ;;
+              *universal*) output="WDTT-universal.apk" ;;
+              *) output="$(basename "$apk")" ;;
+            esac
+            cp "$apk" "build/release-assets/$output"
+          done
+          cp app/src/main/assets/server build/server/wdtt-server-linux-amd64
+          cp app/src/main/jniLibs/arm64-v8a/libclient.so build/go-client/libclient-arm64-v8a.so
+          cp app/src/main/jniLibs/armeabi-v7a/libclient.so build/go-client/libclient-armeabi-v7a.so
+          cp app/src/main/jniLibs/x86_64/libclient.so build/go-client/libclient-x86_64.so
+
+          version_name="$(grep -E 'versionName = ' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          tag="${INPUT_TAG_NAME:-v${version_name}-${GITHUB_RUN_NUMBER}}"
+          release_name="${INPUT_RELEASE_NAME:-WDTT ${version_name} (${tag})}"
+          previous_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -n "$INPUT_CHANGELOG" ]; then
+            changelog="$INPUT_CHANGELOG"
+          elif [ -n "$previous_tag" ]; then
+            changelog="$(git log --pretty=format:'- %s (%h)' "${previous_tag}..HEAD")"
+          else
+            changelog="$(git log -n 30 --pretty=format:'- %s (%h)')"
+          fi
+          [ -n "$changelog" ] || changelog="- Release build from ${GITHUB_SHA::7}"
+          printf '%s\n' "$changelog" > build/release-notes.md
+          echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_name=$release_name" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag_name }}
+          name: ${{ steps.release_meta.outputs.release_name }}
+          body_path: build/release-notes.md
+          target_commitish: ${{ github.sha }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          files: build/release-assets/*
+          fail_on_unmatched_files: true
+          overwrite_files: true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: WDTT-release-build
+          path: |
+            build/release-assets/*
+            build/server/*
+            build/go-client/*
+          if-no-files-found: error
+          retention-days: 14
