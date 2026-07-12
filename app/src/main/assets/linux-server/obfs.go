@@ -59,9 +59,10 @@ type ObfsConfig struct {
 }
 
 type ObfsState struct {
+	mu      sync.Mutex
 	initSeq uint16
 	initTs  uint32
-	count   uint64 // Поле обновляется атомарно через sync/atomic
+	count   uint64
 }
 
 func NewObfsConfig() *ObfsConfig {
@@ -113,21 +114,20 @@ func obfsWrapPacketInto(dst []byte, aead cipher.AEAD, payload []byte, cfg *ObfsC
 		return 0, errors.New("obfs: empty payload")
 	}
 
-	c := atomic.AddUint64(&state.count, 1) - 1
+	state.mu.Lock()
+	c := state.count
+	state.count++
+	state.mu.Unlock()
 	seq := state.initSeq + uint16(c)
 	ts := state.initTs + uint32(c)*960 + uint32(c>>16)
 
 	padRand := 0
-	x := uint64(0)
 	if cfg.PaddingMax > 0 {
-		// Встроенная (inline) логика перемешивания для исключения вызова функции
-		x = (c + 0x9e3779b97f4a7c15) ^ 0xbf58476d1ce4e5b9
-		x ^= x >> 30
-		x *= 0xbf58476d1ce4e5b9
-		x ^= x >> 27
-		x *= 0x94d049bb133111eb
-		x ^= x >> 31
-		padRand = int(x % uint64(cfg.PaddingMax))
+		var randomByte [1]byte
+		if _, err := rand.Read(randomByte[:]); err != nil {
+			return 0, fmt.Errorf("obfs: random padding length: %w", err)
+		}
+		padRand = int(randomByte[0]) % cfg.PaddingMax
 	}
 	padTotal := padRand + 1
 	outLen := 12 + len(payload) + chacha20poly1305.Overhead + padTotal
@@ -147,8 +147,8 @@ func obfsWrapPacketInto(dst []byte, aead cipher.AEAD, payload []byte, cfg *ObfsC
 	padStart := 12 + len(sealed)
 
 	if padRand > 0 {
-		for i := 0; i < padRand; i++ {
-			dst[padStart+i] = byte(x >> ((i % 8) * 8))
+		if _, err := rand.Read(dst[padStart : padStart+padRand]); err != nil {
+			return 0, fmt.Errorf("obfs: random padding bytes: %w", err)
 		}
 	}
 	dst[outLen-1] = byte(padTotal)

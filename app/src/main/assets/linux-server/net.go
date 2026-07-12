@@ -560,6 +560,17 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		return true
 	}
 
+	passwordActive := func() bool {
+		if connPassword == "" || connIsMainPass {
+			return true
+		}
+
+		dbMutex.Lock()
+		defer dbMutex.Unlock()
+		e, ok := db.Passwords[connPassword]
+		return ok && e != nil && !isPasswordExpired(e) && !e.IsDeactivated
+	}
+
 	var proxyWg sync.WaitGroup
 	proxyWg.Add(2)
 
@@ -638,6 +649,9 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 				if nn == 1 && (*b)[0] == 0xFF {
 					continue
 				}
+				if !passwordActive() {
+					return
+				}
 
 				localFromClient += int64(nn)
 				if connPassword != "" && !connIsMainPass {
@@ -704,6 +718,9 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 						}
 						continue
 					}
+					return
+				}
+				if !passwordActive() {
 					return
 				}
 
