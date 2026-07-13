@@ -80,8 +80,14 @@ func stripVkUrl(url string) string {
 }
 
 type wrapKeyEntry struct {
-	id  string
-	key []byte
+	id       string
+	key      []byte
+	identity wrapIdentity
+}
+
+type wrapIdentity struct {
+	Password string
+	IsMain   bool
 }
 
 type wrapKeyStore struct {
@@ -130,7 +136,11 @@ func (s *wrapKeyStore) SetPasswords(mainPassword string, generated []string) err
 		if err != nil {
 			return err
 		}
-		next = append(next, wrapKeyEntry{id: "main", key: key})
+		next = append(next, wrapKeyEntry{
+			id:       "main",
+			key:      key,
+			identity: wrapIdentity{Password: mainPassword, IsMain: true},
+		})
 		seen["main"] = struct{}{}
 	}
 
@@ -149,7 +159,11 @@ func (s *wrapKeyStore) SetPasswords(mainPassword string, generated []string) err
 			}
 			return err
 		}
-		next = append(next, wrapKeyEntry{id: id, key: key})
+		next = append(next, wrapKeyEntry{
+			id:       id,
+			key:      key,
+			identity: wrapIdentity{Password: password},
+		})
 		seen[id] = struct{}{}
 	}
 
@@ -181,7 +195,11 @@ func (s *wrapKeyStore) AddPassword(password string) error {
 			return nil
 		}
 	}
-	s.entries = append(s.entries, wrapKeyEntry{id: id, key: key})
+	s.entries = append(s.entries, wrapKeyEntry{
+		id:       id,
+		key:      key,
+		identity: wrapIdentity{Password: password},
+	})
 	return nil
 }
 
@@ -211,23 +229,23 @@ func (s *wrapKeyStore) Count() int {
 	return len(s.entries)
 }
 
-func (s *wrapKeyStore) Unwrap(raw, dst []byte) ([]byte, int, error) {
+func (s *wrapKeyStore) Unwrap(raw, dst []byte) ([]byte, wrapIdentity, int, error) {
 	if !obfsIsRTPPacket(raw) {
-		return nil, 0, errors.New("wrap: non-obfs packet")
+		return nil, wrapIdentity{}, 0, errors.New("wrap: non-obfs packet")
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if len(s.entries) == 0 {
-		return nil, 0, errors.New("wrap: no active keys")
+		return nil, wrapIdentity{}, 0, errors.New("wrap: no active keys")
 	}
 	for _, entry := range s.entries {
 		m, err := obfsUnwrapPacket(entry.key, raw, dst)
 		if err == nil {
-			return append([]byte(nil), entry.key...), m, nil
+			return append([]byte(nil), entry.key...), entry.identity, m, nil
 		}
 	}
-	return nil, 0, errors.New("wrap: auth failed")
+	return nil, wrapIdentity{}, 0, errors.New("wrap: auth failed")
 }
 
 func refreshWrapKeysFromDBLocked() error {
@@ -800,7 +818,7 @@ func cleanupExpiredPasswords(wgDev *device.Device) int {
 }
 
 func expiredPasswordJanitor(ctx context.Context, wgDev *device.Device) {
-	ticker := time.NewTicker(1 * time.Hour)
+	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 	for {
 		select {

@@ -116,7 +116,7 @@ func main() {
 		go func(c net.Conn) {
 			defer wg.Done()
 			defer c.Close()
-			handleConn(ctx, c, wgEndpoint, wgDev, keys)
+			handleConn(ctx, c, wrapListener, wgEndpoint, wgDev, keys)
 		}(dtlsConn)
 	}
 }

@@ -228,7 +228,7 @@ func obfsIsRTPPacket(wire []byte) bool {
 	return pt == 111 || pt == 96
 }
 
-func listenWrapped(addr *net.UDPAddr, keys *wrapKeyStore) (dtlsnet.PacketListener, error) {
+func listenWrapped(addr *net.UDPAddr, keys *wrapKeyStore) (*wrapPacketListener, error) {
 	if keys == nil || keys.Count() == 0 {
 		return nil, errors.New("wrap: no active keys")
 	}
@@ -245,6 +245,9 @@ func listenWrapped(addr *net.UDPAddr, keys *wrapKeyStore) (dtlsnet.PacketListene
 type wrapPacketListener struct {
 	inner dtlsnet.PacketListener
 	keys  *wrapKeyStore
+
+	connsMu sync.RWMutex
+	conns   map[string]*wrapPacketConn
 }
 
 func (l *wrapPacketListener) Accept() (net.PacketConn, net.Addr, error) {
@@ -252,17 +255,46 @@ func (l *wrapPacketListener) Accept() (net.PacketConn, net.Addr, error) {
 	if err != nil {
 		return pc, addr, err
 	}
-	return &wrapPacketConn{inner: pc, keys: l.keys}, addr, nil
+	wrapped := &wrapPacketConn{inner: pc, keys: l.keys}
+	addrKey := addr.String()
+	wrapped.onClose = func() {
+		l.connsMu.Lock()
+		if l.conns[addrKey] == wrapped {
+			delete(l.conns, addrKey)
+		}
+		l.connsMu.Unlock()
+	}
+	l.connsMu.Lock()
+	if l.conns == nil {
+		l.conns = make(map[string]*wrapPacketConn)
+	}
+	l.conns[addrKey] = wrapped
+	l.connsMu.Unlock()
+	return wrapped, addr, nil
 }
 
 func (l *wrapPacketListener) Close() error   { return l.inner.Close() }
 func (l *wrapPacketListener) Addr() net.Addr { return l.inner.Addr() }
+
+func (l *wrapPacketListener) IdentityFor(addr net.Addr) (wrapIdentity, bool) {
+	if addr == nil {
+		return wrapIdentity{}, false
+	}
+	l.connsMu.RLock()
+	conn := l.conns[addr.String()]
+	l.connsMu.RUnlock()
+	if conn == nil {
+		return wrapIdentity{}, false
+	}
+	return conn.Identity()
+}
 
 type wrapPacketConn struct {
 	inner     net.PacketConn
 	keys      *wrapKeyStore
 	key       []byte
 	aead      cipher.AEAD
+	identity  wrapIdentity
 	selected  int32
 	authLog   int32
 	obfsCfg   *ObfsConfig
@@ -271,6 +303,16 @@ type wrapPacketConn struct {
 	rxMu  sync.Mutex
 	txMu  sync.Mutex
 	txBuf []byte
+
+	closeOnce sync.Once
+	onClose   func()
+}
+
+func (c *wrapPacketConn) Identity() (wrapIdentity, bool) {
+	if atomic.LoadInt32(&c.selected) != 1 {
+		return wrapIdentity{}, false
+	}
+	return c.identity, c.identity.Password != ""
 }
 
 func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
@@ -315,7 +357,7 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		return m, addr, nil
 	}
 
-	key, m, uErr := c.keys.Unwrap(raw, p)
+	key, identity, m, uErr := c.keys.Unwrap(raw, p)
 	if uErr != nil {
 		if atomic.CompareAndSwapInt32(&c.authLog, 0, 1) {
 			log.Printf("[WRAP] Отказ: RTP AEAD auth failed from %s (keys=%d)", addr.String(), c.keys.Count())
@@ -328,6 +370,7 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	}
 	c.key = key
 	c.aead = aead
+	c.identity = identity
 	c.obfsCfg = NewObfsConfig()
 
 	if len(raw) > 1 {
@@ -362,7 +405,14 @@ func (c *wrapPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return len(p), nil
 }
 
-func (c *wrapPacketConn) Close() error                       { return c.inner.Close() }
+func (c *wrapPacketConn) Close() error {
+	c.closeOnce.Do(func() {
+		if c.onClose != nil {
+			c.onClose()
+		}
+	})
+	return c.inner.Close()
+}
 func (c *wrapPacketConn) LocalAddr() net.Addr                { return c.inner.LocalAddr() }
 func (c *wrapPacketConn) SetDeadline(t time.Time) error      { return c.inner.SetDeadline(t) }
 func (c *wrapPacketConn) SetReadDeadline(t time.Time) error  { return c.inner.SetReadDeadline(t) }

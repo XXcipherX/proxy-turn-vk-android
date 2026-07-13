@@ -186,12 +186,15 @@ func TestWrapKeyStoreUnwrapSelectsKey(t *testing.T) {
 		n, _ := obfsWrapPacketInto(dst, aead, payload, cfg, state)
 
 		out := make([]byte, len(payload)+64)
-		gotKey, m, err := ks.Unwrap(dst[:n], out)
+		gotKey, identity, m, err := ks.Unwrap(dst[:n], out)
 		if err != nil {
 			t.Fatalf("pw=%s Unwrap: %v", pw, err)
 		}
 		if !bytes.Equal(gotKey, key) {
 			t.Errorf("pw=%s: store selected wrong key", pw)
+		}
+		if identity.Password != pw || identity.IsMain != (pw == "main-pw") {
+			t.Errorf("pw=%s: wrong identity: %+v", pw, identity)
 		}
 		if !bytes.Equal(out[:m], payload) {
 			t.Errorf("pw=%s: payload mismatch", pw)
@@ -206,7 +209,7 @@ func TestWrapKeyStoreUnwrapSelectsKey(t *testing.T) {
 	dst := make([]byte, obfsWrapWireLen(16, cfg))
 	n, _ := obfsWrapPacketInto(dst, badAead, randPayload(t, 16), cfg, state)
 	out := make([]byte, 128)
-	if _, _, err := ks.Unwrap(dst[:n], out); err == nil {
+	if _, _, _, err := ks.Unwrap(dst[:n], out); err == nil {
 		t.Fatal("expected Unwrap failure for unregistered password")
 	}
 }

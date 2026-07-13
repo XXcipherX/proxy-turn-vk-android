@@ -389,14 +389,11 @@ PersistentKeepalive = %d`,
 	)
 }
 
-func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
+func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacketListener, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
 	// Добавлен defer для предотвращения утечки сокетов при ошибках на любом этапе функции
 	defer clientConn.Close()
 
 	atomic.AddInt64(&totalConns, 1)
-
-	var connPassword string
-	var connIsMainPass bool
 
 	dtlsConn, ok := clientConn.(*dtls.Conn)
 	if !ok {
@@ -409,6 +406,33 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		return
 	}
 	hcancel()
+
+	identity, ok := authSource.IdentityFor(clientConn.RemoteAddr())
+	if !ok {
+		log.Printf("[WRAP] Отказ: не удалось связать DTLS с WRAP-ключом для %s", clientConn.RemoteAddr())
+		return
+	}
+	connPassword := identity.Password
+	connIsMainPass := identity.IsMain
+
+	passwordActive := func() bool {
+		if connIsMainPass {
+			dbMutex.RLock()
+			active := db.MainPassword == connPassword
+			dbMutex.RUnlock()
+			return active
+		}
+
+		dbMutex.RLock()
+		entry, exists := db.Passwords[connPassword]
+		active := exists && entry != nil && !isPasswordExpired(entry) && !entry.IsDeactivated
+		dbMutex.RUnlock()
+		return active
+	}
+	if !passwordActive() {
+		log.Printf("[WRAP] Отказ: неактивный ключ %s для %s", maskPassword(connPassword), clientConn.RemoteAddr())
+		return
+	}
 
 	atomic.AddInt32(&activeConns, 1)
 	defer atomic.AddInt32(&activeConns, -1)
@@ -439,24 +463,29 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			password = parts[2]
 		}
 
+		if password != connPassword {
+			_, _ = clientConn.Write([]byte("DENIED:password_mismatch"))
+			log.Printf("[WG] Отказ: GETCONF-пароль не совпадает с WRAP-ключом для %s", deviceID)
+			return
+		}
+
 		dbMutex.Lock()
 
-		isMainPass := password != "" && password == db.MainPassword
-		entry, isGenPass := db.Passwords[password]
+		isMainPass := connIsMainPass && password == db.MainPassword
+		entry, isGenPass := db.Passwords[connPassword]
 		valid := isMainPass || (isGenPass && !isPasswordExpired(entry))
 
 		if valid && isGenPass && entry.IsDeactivated {
 			clientConn.Write([]byte("DENIED:deactivated"))
 			log.Printf("[WG] Отказ: пароль %s деактивирован, запрос от %s", maskPassword(password), deviceID)
 			dbMutex.Unlock()
+			return
 		} else if valid && isGenPass && entry.DeviceID != "" && entry.DeviceID != deviceID {
 			clientConn.Write([]byte("DENIED:device_mismatch"))
 			log.Printf("[WG] Отказ: пароль %s привязан к %s, запрос от %s", maskPassword(password), entry.DeviceID, deviceID)
 			dbMutex.Unlock()
+			return
 		} else if valid {
-			connPassword = password
-			connIsMainPass = isMainPass
-
 			if isGenPass && entry.DeviceID == "" {
 				entry.DeviceID = deviceID
 				saveDBLazy()
@@ -484,6 +513,9 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 				clientConn.Write([]byte("NOCONF"))
 			}
 			dbMutex.Unlock()
+			if dev == nil {
+				return
+			}
 		} else {
 			if isGenPass && isPasswordExpired(entry) {
 				clientConn.Write([]byte("DENIED:expired"))
@@ -493,6 +525,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 				log.Printf("[WG] Отказ (неверный пароль) от %s", deviceID)
 			}
 			dbMutex.Unlock()
+			return
 		}
 
 		clientConn.SetReadDeadline(time.Now().Add(5 * time.Minute))
@@ -516,6 +549,10 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		firstPacket = buf[:n]
 	}
 
+	if !passwordActive() {
+		return
+	}
+
 	wgConn, err := net.Dial("udp", wgEndpoint)
 	if err != nil {
 		return
@@ -527,10 +564,16 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		uc.SetWriteBuffer(2 * 1024 * 1024)
 	}
 
+	var localUpBytes int64
+	var localDownBytes int64
+
 	if _, err := wgConn.Write(firstPacket); err != nil {
 		return
 	}
 	atomic.AddInt64(&totalBytesFromClient, int64(len(firstPacket)))
+	if !connIsMainPass {
+		atomic.AddInt64(&localUpBytes, int64(len(firstPacket)))
+	}
 
 	pctx, pcancel := context.WithCancel(ctx)
 	defer pcancel()
@@ -540,9 +583,6 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		wgConn.SetDeadline(time.Now())
 	})
 
-	var localUpBytes int64
-	var localDownBytes int64
-
 	flushStats := func() bool {
 		up := atomic.SwapInt64(&localUpBytes, 0)
 		down := atomic.SwapInt64(&localDownBytes, 0)
@@ -551,30 +591,22 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		defer dbMutex.Unlock()
 
 		e, ok := db.Passwords[connPassword]
-		if !ok || e == nil || isPasswordExpired(e) || e.IsDeactivated {
+		if !ok || e == nil {
 			return false
 		}
 
 		e.UpBytes += up
 		e.DownBytes += down
-		return true
-	}
-
-	passwordActive := func() bool {
-		if connPassword == "" || connIsMainPass {
-			return true
+		if up != 0 || down != 0 {
+			saveDBLazy()
 		}
-
-		dbMutex.Lock()
-		defer dbMutex.Unlock()
-		e, ok := db.Passwords[connPassword]
-		return ok && e != nil && !isPasswordExpired(e) && !e.IsDeactivated
+		return !isPasswordExpired(e) && !e.IsDeactivated
 	}
 
 	var proxyWg sync.WaitGroup
 	proxyWg.Add(2)
 
-	if connPassword != "" && !connIsMainPass {
+	if !connIsMainPass {
 		proxyWg.Add(1)
 		go func() {
 			defer proxyWg.Done()
@@ -654,7 +686,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 				}
 
 				localFromClient += int64(nn)
-				if connPassword != "" && !connIsMainPass {
+				if !connIsMainPass {
 					localPassUp += int64(nn)
 				}
 
@@ -725,7 +757,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 				}
 
 				localToClient += int64(nn)
-				if connPassword != "" && !connIsMainPass {
+				if !connIsMainPass {
 					localPassDown += int64(nn)
 				}
 
@@ -739,7 +771,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 	proxyWg.Wait()
 
 	// Добавлен финальный сброс статистики после завершения работы всех прокси-горутин
-	if connPassword != "" && !connIsMainPass {
+	if !connIsMainPass {
 		flushStats()
 	}
 }
