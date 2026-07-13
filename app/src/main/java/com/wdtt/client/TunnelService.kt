@@ -85,23 +85,6 @@ class TunnelService : Service() {
                 startTunnel(params)
             }
             "STOP" -> stopTunnel()
-            "DEPLOY_START" -> {
-                val notification = createNotification("Установка на сервер...", "DEPLOY_CANCEL", "Отменить")
-                startPersistentForeground(notification)
-                acquireWakeLock()
-            }
-            "DEPLOY_CANCEL" -> {
-                com.wdtt.client.DeployManager.writeError("[!] ❌ Установка отменена пользователем")
-                com.wdtt.client.DeployManager.stopDeploy("error: Отменена пользователем")
-                stopForeground(STOP_FOREGROUND_REMOVE)
-            }
-            "DEPLOY_STOP" -> {
-                if (!TunnelManager.running.value) {
-                    stopTunnel()
-                } else {
-                    updateNotification("Туннель активен")
-                }
-            }
         }
         return START_STICKY
     }

@@ -46,13 +46,6 @@ class SettingsStore(context: Context) {
 
         private val USER_AGENT = stringPreferencesKey("user_agent")
 
-        private val DEPLOY_IP = stringPreferencesKey("deploy_ip")
-        private val DEPLOY_LOGIN = stringPreferencesKey("deploy_login")
-        private val DEPLOY_PASSWORD = stringPreferencesKey("deploy_password")
-        private val DEPLOY_PASSWORD_ENCRYPTED = stringPreferencesKey("deploy_password_encrypted")
-        private val DEPLOY_SSH_PORT = stringPreferencesKey("deploy_ssh_port")
-        private val DEPLOY_DNS1 = stringPreferencesKey("deploy_dns1")
-        private val DEPLOY_DNS2 = stringPreferencesKey("deploy_dns2")
         private val EXCLUDED_APPS = stringPreferencesKey("excluded_apps")
         
         private val DETAILED_LOGS = booleanPreferencesKey("detailed_logs")
@@ -60,12 +53,6 @@ class SettingsStore(context: Context) {
         
         private val CONNECTION_PASSWORD = stringPreferencesKey("connection_password")
         private val CONNECTION_PASSWORD_ENCRYPTED = stringPreferencesKey("connection_password_encrypted")
-        private val DEPLOY_MAIN_PASSWORD = stringPreferencesKey("deploy_main_password")
-        private val DEPLOY_MAIN_PASSWORD_ENCRYPTED = stringPreferencesKey("deploy_main_password_encrypted")
-        private val DEPLOY_ADMIN_ID = stringPreferencesKey("deploy_admin_id")
-        private val DEPLOY_ADMIN_ID_ENCRYPTED = stringPreferencesKey("deploy_admin_id_encrypted")
-        private val DEPLOY_BOT_TOKEN = stringPreferencesKey("deploy_bot_token")
-        private val DEPLOY_BOT_TOKEN_ENCRYPTED = stringPreferencesKey("deploy_bot_token_encrypted")
 
         
         private val PROXY_MODE = stringPreferencesKey("proxy_mode") 
@@ -111,7 +98,7 @@ class SettingsStore(context: Context) {
             val newName = "${baseKey.name}_$profile"
             @Suppress("UNCHECKED_CAST")
             return when (baseKey) {
-                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, DEPLOY_IP, DEPLOY_LOGIN, DEPLOY_PASSWORD, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_SSH_PORT, DEPLOY_DNS1, DEPLOY_DNS2, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_ADMIN_ID, DEPLOY_ADMIN_ID_ENCRYPTED, DEPLOY_BOT_TOKEN, DEPLOY_BOT_TOKEN_ENCRYPTED, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, WDTT_LINK, CONNECTION_PROFILES_ENCRYPTED, ACTIVE_CONNECTION_PROFILE_ID, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS -> stringPreferencesKey(newName) as Preferences.Key<T>
+                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, WDTT_LINK, CONNECTION_PROFILES_ENCRYPTED, ACTIVE_CONNECTION_PROFILE_ID, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS -> stringPreferencesKey(newName) as Preferences.Key<T>
                 WORKERS_PER_HASH, LISTEN_PORT, SERVER_DTLS_PORT, SERVER_WG_PORT, PROXY_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
                 MANUAL_PORTS_ENABLED, NO_DTLS, NO_DNS, IS_WHITELIST, WDTT_LINK_MODE, DETAILED_LOGS -> booleanPreferencesKey(newName) as Preferences.Key<T>
                 else -> throw IllegalArgumentException("Unsupported key type: ${baseKey.name}")
@@ -124,6 +111,7 @@ class SettingsStore(context: Context) {
 
     init {
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            purgeLegacyDeploySettings()
             migrateSecretsToKeystore()
             migrateLegacyWhitelistMode()
             migrateLegacyWdttLink()
@@ -200,30 +188,6 @@ class SettingsStore(context: Context) {
         prefs[getProfileKey(USER_AGENT, profile)] ?: ""
     }
 
-    val deployIp: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(DEPLOY_IP, profile)] ?: ""
-    }
-    val deployLogin: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(DEPLOY_LOGIN, profile)] ?: ""
-    }
-    val deployPassword: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        readSecret(prefs, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_PASSWORD, profile)
-    }
-    val deploySshPort: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(DEPLOY_SSH_PORT, profile)] ?: ""
-    }
-    val deployDns1: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(DEPLOY_DNS1, profile)] ?: "1.1.1.1"
-    }
-    val deployDns2: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(DEPLOY_DNS2, profile)] ?: "1.0.0.1"
-    }
     val excludedApps: Flow<String> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(EXCLUDED_APPS, profile)] ?: ""
@@ -239,19 +203,6 @@ class SettingsStore(context: Context) {
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         readSecret(prefs, CONNECTION_PASSWORD_ENCRYPTED, CONNECTION_PASSWORD, profile)
     }
-    val deployMainPassword: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        readSecret(prefs, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, profile)
-    }
-    val deployAdminId: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        readSecret(prefs, DEPLOY_ADMIN_ID_ENCRYPTED, DEPLOY_ADMIN_ID, profile)
-    }
-    val deployBotToken: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        readSecret(prefs, DEPLOY_BOT_TOKEN_ENCRYPTED, DEPLOY_BOT_TOKEN, profile)
-    }
-
     
     val proxyMode: Flow<String> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
@@ -542,18 +493,6 @@ class SettingsStore(context: Context) {
         }
     }
 
-    suspend fun saveDeploy(ip: String, login: String, pass: String, sshPort: String, dns1: String, dns2: String) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(DEPLOY_IP, profile)] = ip
-            prefs[getProfileKey(DEPLOY_LOGIN, profile)] = login
-            prefs.putSecret(DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_PASSWORD, pass, profile)
-            prefs[getProfileKey(DEPLOY_SSH_PORT, profile)] = sshPort
-            prefs[getProfileKey(DEPLOY_DNS1, profile)] = dns1
-            prefs[getProfileKey(DEPLOY_DNS2, profile)] = dns2
-        }
-    }
-
     suspend fun saveExcludedApps(packages: String) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
@@ -578,16 +517,6 @@ class SettingsStore(context: Context) {
     }
     
     
-    suspend fun saveDeploySecrets(mainPass: String, adminId: String, botToken: String, sshPort: String) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs.putSecret(DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, mainPass, profile)
-            prefs.putSecret(DEPLOY_ADMIN_ID_ENCRYPTED, DEPLOY_ADMIN_ID, adminId, profile)
-            prefs.putSecret(DEPLOY_BOT_TOKEN_ENCRYPTED, DEPLOY_BOT_TOKEN, botToken, profile)
-            prefs[getProfileKey(DEPLOY_SSH_PORT, profile)] = sshPort
-        }
-    }
-
     
     suspend fun saveProxyMode(mode: String, host: String, port: Int) {
         dataStore.edit { prefs ->
@@ -671,11 +600,33 @@ class SettingsStore(context: Context) {
     private suspend fun migrateSecretsToKeystore() {
         dataStore.edit { prefs ->
             for (profile in 0..2) {
-                prefs.migrateSecret(getProfileKey(DEPLOY_PASSWORD_ENCRYPTED, profile), getProfileKey(DEPLOY_PASSWORD, profile))
                 prefs.migrateSecret(getProfileKey(CONNECTION_PASSWORD_ENCRYPTED, profile), getProfileKey(CONNECTION_PASSWORD, profile))
-                prefs.migrateSecret(getProfileKey(DEPLOY_MAIN_PASSWORD_ENCRYPTED, profile), getProfileKey(DEPLOY_MAIN_PASSWORD, profile))
-                prefs.migrateSecret(getProfileKey(DEPLOY_ADMIN_ID_ENCRYPTED, profile), getProfileKey(DEPLOY_ADMIN_ID, profile))
-                prefs.migrateSecret(getProfileKey(DEPLOY_BOT_TOKEN_ENCRYPTED, profile), getProfileKey(DEPLOY_BOT_TOKEN, profile))
+            }
+        }
+    }
+
+    private suspend fun purgeLegacyDeploySettings() {
+        val names = listOf(
+            "deploy_ip",
+            "deploy_login",
+            "deploy_password",
+            "deploy_password_encrypted",
+            "deploy_ssh_port",
+            "deploy_dns1",
+            "deploy_dns2",
+            "deploy_main_password",
+            "deploy_main_password_encrypted",
+            "deploy_admin_id",
+            "deploy_admin_id_encrypted",
+            "deploy_bot_token",
+            "deploy_bot_token_encrypted",
+        )
+        dataStore.edit { prefs ->
+            for (profile in 0..2) {
+                val suffix = if (profile == 0) "" else "_$profile"
+                for (name in names) {
+                    prefs.remove(stringPreferencesKey(name + suffix))
+                }
             }
         }
     }

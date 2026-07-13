@@ -34,12 +34,10 @@ import androidx.compose.foundation.shape.GenericShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.VpnKey
-import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Terminal
@@ -68,7 +66,6 @@ import com.wdtt.client.ui.AppUpdateDialog
 import com.wdtt.client.ui.FloatingToolbar
 import com.wdtt.client.ui.LogsTab
 import com.wdtt.client.ui.SettingsTab
-import com.wdtt.client.ui.DeployTab
 import com.wdtt.client.ui.ExceptionsTab
 import com.wdtt.client.ui.InfoTab
 import kotlinx.coroutines.delay
@@ -231,10 +228,9 @@ private data class NavItem(
 
 private val navItems = listOf(
     NavItem(0, "Туннель", Icons.Filled.VpnKey, Icons.Outlined.VpnKey),
-    NavItem(1, "Деплой", Icons.Filled.Cloud, Icons.Outlined.Cloud),
-    NavItem(2, "Исключ.", Icons.Filled.FilterList, Icons.Outlined.FilterList),
-    NavItem(3, "Логи", Icons.Filled.Terminal, Icons.Outlined.Terminal),
-    NavItem(4, "Инфо", Icons.Filled.Info, Icons.Outlined.Info),
+    NavItem(1, "Исключ.", Icons.Filled.FilterList, Icons.Outlined.FilterList),
+    NavItem(2, "Логи", Icons.Filled.Terminal, Icons.Outlined.Terminal),
+    NavItem(3, "Инфо", Icons.Filled.Info, Icons.Outlined.Info),
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -259,7 +255,6 @@ fun MainScreen(
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     val activeProfile by settingsStore.activeProfile.collectAsStateWithLifecycle(initialValue = 0)
-    val wdttLinkMode by settingsStore.wdttLinkMode.collectAsStateWithLifecycle(initialValue = false)
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var dragTargetIndex by remember { mutableIntStateOf(-1) }
     var dragProgress by remember { mutableFloatStateOf(0f) }
@@ -271,24 +266,12 @@ fun MainScreen(
     val safeBottomInset = with(density) { WindowInsets.safeDrawing.getBottom(density).toDp() }
     val navOverlayReserve = safeBottomInset + 96.dp
 
-    val activeNavItems = remember(wdttLinkMode) {
-        if (wdttLinkMode) {
-            navItems.filter { it.id != 1 }
-        } else {
-            navItems
-        }
-    }
+    val activeNavItems = navItems
     val actionsExpanded = rememberSaveable { mutableStateOf(false) }
     val projectExpanded = rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(wdttLinkMode) {
-        if (wdttLinkMode && selectedTab == 1) {
-            selectedTab = 0
-        }
-    }
-
     LaunchedEffect(selectedTab) {
-        if (selectedTab == 3) TunnelManager.clearUnreadErrors()
+        if (selectedTab == 2) TunnelManager.clearUnreadErrors()
     }
 
     LaunchedEffect(updateCheckIntervalHours) {
@@ -353,7 +336,7 @@ fun MainScreen(
                     .fillMaxSize()
                     .padding(padding)
                     .consumeWindowInsets(padding)
-                    .pointerInput(selectedTab, wdttLinkMode) {
+                    .pointerInput(selectedTab) {
                         var totalDrag = 0f
                         detectHorizontalDragGestures(
                             onDragStart = {
@@ -368,7 +351,7 @@ fun MainScreen(
                             onDragEnd = {
                                 if (dragTargetIndex in activeNavItems.indices && dragProgress >= 0.5f) {
                                     selectedTab = activeNavItems[dragTargetIndex].id
-                                    if (selectedTab == 3) TunnelManager.clearUnreadErrors()
+                                    if (selectedTab == 2) TunnelManager.clearUnreadErrors()
                                 }
                                 dragTargetIndex = -1
                                 dragProgress = 0f
@@ -407,10 +390,9 @@ fun MainScreen(
                 ) { tab ->
                     when (tab) {
                         0 -> SettingsTab()
-                        1 -> if (!wdttLinkMode) DeployTab() else Spacer(modifier = Modifier.fillMaxSize())
-                        2 -> ExceptionsTab()
-                        3 -> LogsTab()
-                        4 -> InfoTab(actionsExpandedState = actionsExpanded, projectExpandedState = projectExpanded)
+                        1 -> ExceptionsTab()
+                        2 -> LogsTab()
+                        3 -> InfoTab(actionsExpandedState = actionsExpanded, projectExpandedState = projectExpanded)
                     }
                 }
 
@@ -425,7 +407,7 @@ fun MainScreen(
                         if (selectedTab != index) {
                             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                             selectedTab = index
-                            if (index == 3) TunnelManager.clearUnreadErrors()
+                            if (index == 2) TunnelManager.clearUnreadErrors()
                         }
                         dragTargetIndex = -1
                         dragProgress = 0f
@@ -602,7 +584,7 @@ private fun ProxyNavigationBar(
                                     modifier = Modifier.size(22.dp),
                                     tint = iconColor
                                 )
-                                if (item.id == 3 && unreadErrors > 0) {
+                                if (item.id == 2 && unreadErrors > 0) {
                                     Badge(
                                         containerColor = if (tunnelRunning) colors.primary else WDTTColors.warning,
                                         contentColor = colors.onPrimary,

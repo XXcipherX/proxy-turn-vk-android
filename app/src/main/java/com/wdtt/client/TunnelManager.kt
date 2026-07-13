@@ -152,17 +152,6 @@ object TunnelManager {
         }
     }
 
-    
-    fun addDeployErrorLog(message: String) {
-        val hash = message.hashCode().toString()
-        updateLog("deploy_err_$hash", "[ДЕПЛОЙ] $message", 99, true)
-    }
-
-    fun addDeploySuccessLog(message: String) {
-        val hash = message.hashCode().toString() + System.currentTimeMillis()
-        updateLog("deploy_ok_$hash", message, 2, false)
-    }
-
     private fun updateLog(key: String, message: String, priority: Int, isError: Boolean = false) {
         if (!isLoggingEnabled) return
         if (isError) {

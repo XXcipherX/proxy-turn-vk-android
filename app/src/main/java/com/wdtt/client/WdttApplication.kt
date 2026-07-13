@@ -19,11 +19,6 @@ class WdttApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        DeployManager.init(this)
-        
-        
-        
-        
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching {
                 val backend = getBackend(this@WdttApplication)
