@@ -1,0 +1,30 @@
+name: Workflow lint
+
+on:
+  push:
+    paths:
+      - ".github/dependabot.yml"
+      - ".github/workflows/**"
+  pull_request:
+    paths:
+      - ".github/dependabot.yml"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: Validate GitHub Actions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Run actionlint
+        uses: docker://rhysd/actionlint:1.7.12

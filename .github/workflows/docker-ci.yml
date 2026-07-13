@@ -1,0 +1,50 @@
+name: Docker CI
+
+on:
+  push:
+    paths:
+      - "Dockerfile"
+      - "app/src/main/assets/linux-server/**"
+      - "scripts/build_server.sh"
+      - ".github/workflows/docker-ci.yml"
+      - ".github/workflows/docker-image.yml"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "app/src/main/assets/linux-server/**"
+      - "scripts/build_server.sh"
+      - ".github/workflows/docker-ci.yml"
+      - ".github/workflows/docker-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Multi-platform image build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image without publishing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          outputs: type=oci,dest=/tmp/wdtt-image.tar
+          pull: true
+          push: false
