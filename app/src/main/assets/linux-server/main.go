@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
@@ -43,12 +42,10 @@ func main() {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sig)
 	go func() {
 		<-sig
 		cancel()
-		time.Sleep(2 * time.Second)
-		flushDB()
-		os.Exit(0)
 	}()
 
 	if err := initDB(*configDir, *mainPass, *adminID, *botToken); err != nil {
@@ -79,9 +76,20 @@ func main() {
 		runCmdSilent("ip", "link", "del", wgIfaceName)
 	}()
 
-	go statsLoop(ctx, *configDir)
-	go expiredPasswordJanitor(ctx, wgDev)
-	go botLoop(*botToken, *adminID, wgDev)
+	var workers sync.WaitGroup
+	workers.Add(3)
+	go func() {
+		defer workers.Done()
+		statsLoop(ctx, *configDir)
+	}()
+	go func() {
+		defer workers.Done()
+		expiredPasswordJanitor(ctx, wgDev)
+	}()
+	go func() {
+		defer workers.Done()
+		botLoop(ctx, *botToken, *adminID, wgDev)
+	}()
 
 	addr, _ := net.ResolveUDPAddr("udp", *listen)
 	cert, _ := selfsign.GenerateSelfSigned()
@@ -106,21 +114,23 @@ func main() {
 	log.Printf("   WRAP: password HKDF + RTP AEAD | keys: %d", serverWrapKeys.Count())
 	log.Println("[SERVER] Готов")
 
-	var wg sync.WaitGroup
 	for {
 		dtlsConn, err := listener.Accept()
 		if err != nil {
 			select {
 			case <-ctx.Done():
-				wg.Wait()
+				workers.Wait()
+				if err := flushDB(); err != nil {
+					log.Printf("[DB] Финальное сохранение: %v", err)
+				}
 				return
 			default:
 			}
 			continue
 		}
-		wg.Add(1)
+		workers.Add(1)
 		go func(c net.Conn) {
-			defer wg.Done()
+			defer workers.Done()
 			defer c.Close()
 			handleConn(ctx, c, wrapListener, wgEndpoint, wgDev, keys)
 		}(dtlsConn)

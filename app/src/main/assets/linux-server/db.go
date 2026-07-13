@@ -314,7 +314,7 @@ func saveDBLazy() {
 	dbSaveMu.Unlock()
 }
 
-func flushDB() {
+func flushDB() error {
 	dbSaveMu.Lock()
 	timer := dbSaveTimer
 	dbSaveTimer = nil
@@ -323,9 +323,7 @@ func flushDB() {
 		timer.Stop()
 	}
 	atomic.StoreInt32(&dbDirty, 0)
-	if err := saveDBSync(); err != nil {
-		log.Printf("[DB] final save: %v", err)
-	}
+	return saveDBSync()
 }
 
 func saveDBSync() error {
@@ -338,13 +336,44 @@ func saveDBSync() error {
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	tmp := dbFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	dir := filepath.Dir(dbFile)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create database directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return fmt.Errorf("secure database directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".passwords-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("secure temp file: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		return fmt.Errorf("write temp file: %w", err)
 	}
-	if err := os.Rename(tmp, dbFile); err != nil {
-		_ = os.Remove(tmp)
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, dbFile); err != nil {
 		return fmt.Errorf("replace database: %w", err)
+	}
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open database directory for sync: %w", err)
+	}
+	defer dirHandle.Close()
+	if err := dirHandle.Sync(); err != nil {
+		return fmt.Errorf("sync database directory: %w", err)
 	}
 	return nil
 }
@@ -373,7 +402,7 @@ func getNextIP() string {
 	return ""
 }
 
-func botLoop(token string, adminIDstr string, wgDev *device.Device) {
+func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device.Device) {
 	if token == "" || adminIDstr == "" {
 		return
 	}
@@ -382,18 +411,16 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 		return
 	}
 
-	go func() {
-		payload := map[string]interface{}{
-			"commands": []map[string]string{
-				{"command": "start", "description": "Главное меню"},
-				{"command": "new", "description": "Создать временный пароль"},
-				{"command": "list", "description": "Управление доступами"},
-			},
-		}
-		if err := postTelegram(token, "setMyCommands", payload); err != nil {
-			log.Printf("[TG] setMyCommands: %v", err)
-		}
-	}()
+	payload := map[string]interface{}{
+		"commands": []map[string]string{
+			{"command": "start", "description": "Главное меню"},
+			{"command": "new", "description": "Создать временный пароль"},
+			{"command": "list", "description": "Управление доступами"},
+		},
+	}
+	if err := postTelegram(token, "setMyCommands", payload); err != nil {
+		log.Printf("[TG] setMyCommands: %v", err)
+	}
 
 	offset := 0
 	client := &http.Client{Timeout: 65 * time.Second}
@@ -407,10 +434,27 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 	var tempPorts string
 
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?timeout=60&offset=%d", token, offset)
-		resp, err := client.Get(url)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
-			time.Sleep(2 * time.Second)
+			log.Printf("[TG] getUpdates request: %v", err)
+			return
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
 			continue
 		}
 
@@ -440,7 +484,11 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 		err = json.NewDecoder(resp.Body).Decode(&res)
 		resp.Body.Close()
 		if err != nil {
-			time.Sleep(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
 			continue
 		}
 
