@@ -57,6 +57,36 @@ func TestGeneratePasswordFailsClosed(t *testing.T) {
 	}
 }
 
+func TestMainDeviceCallbacksExcludeGeneratedPasswordDevices(t *testing.T) {
+	mainID := "main-device-0001"
+	generatedID := "generated-device-0001"
+	database := &Database{
+		Passwords: map[string]*PasswordEntry{
+			"generated-secret": {DeviceID: generatedID},
+		},
+		Devices: map[string]*ClientDevice{
+			mainID:      {DeviceID: mainID, IP: "10.66.66.2"},
+			generatedID: {DeviceID: generatedID, IP: "10.66.66.3"},
+		},
+	}
+
+	ids := mainDeviceIDs(database)
+	if len(ids) != 1 || ids[0] != mainID {
+		t.Fatalf("mainDeviceIDs = %v, want [%s]", ids, mainID)
+	}
+	token := deviceCallbackToken(mainID)
+	if len(token) != 16 || strings.Contains(token, mainID) {
+		t.Fatalf("unsafe callback token %q", token)
+	}
+	gotID, gotDevice, ok := findMainDeviceByCallbackToken(database, token)
+	if !ok || gotID != mainID || gotDevice != database.Devices[mainID] {
+		t.Fatalf("findMainDeviceByCallbackToken = (%q, %v, %v)", gotID, gotDevice, ok)
+	}
+	if _, _, ok := findMainDeviceByCallbackToken(database, deviceCallbackToken(generatedID)); ok {
+		t.Fatal("generated-password device was exposed as a main device")
+	}
+}
+
 func TestInitDBRejectsCorruptDatabaseWithoutOverwritingIt(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "passwords.json")

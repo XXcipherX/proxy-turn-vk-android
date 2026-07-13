@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -175,6 +176,50 @@ func deriveWrapKey(password string) ([]byte, error) {
 func wrapKeyID(password string) string {
 	sum := sha256.Sum256([]byte("WDTT-WRAP-ID-v1\x00" + password))
 	return hex.EncodeToString(sum[:8])
+}
+
+func deviceCallbackToken(deviceID string) string {
+	sum := sha256.Sum256([]byte("WDTT-DEVICE-CALLBACK-v1\x00" + deviceID))
+	return hex.EncodeToString(sum[:8])
+}
+
+func mainDeviceIDs(database *Database) []string {
+	boundToGeneratedPassword := make(map[string]struct{}, len(database.Passwords))
+	for _, entry := range database.Passwords {
+		if entry != nil && entry.DeviceID != "" {
+			boundToGeneratedPassword[entry.DeviceID] = struct{}{}
+		}
+	}
+
+	ids := make([]string, 0, len(database.Devices))
+	for deviceID, dev := range database.Devices {
+		if dev == nil {
+			continue
+		}
+		if _, generated := boundToGeneratedPassword[deviceID]; !generated {
+			ids = append(ids, deviceID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func findMainDeviceByCallbackToken(database *Database, token string) (string, *ClientDevice, bool) {
+	var foundID string
+	var foundDevice *ClientDevice
+	for _, deviceID := range mainDeviceIDs(database) {
+		if deviceCallbackToken(deviceID) != token {
+			continue
+		}
+		// Treat even a theoretical truncated-hash collision as an invalid
+		// callback rather than deleting an arbitrary device.
+		if foundDevice != nil {
+			return "", nil, false
+		}
+		foundID = deviceID
+		foundDevice = database.Devices[deviceID]
+	}
+	return foundID, foundDevice, foundDevice != nil
 }
 
 func zeroBytes(b []byte) {
@@ -742,24 +787,21 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 					}
 
 				} else if strings.HasPrefix(data, "deldev_") {
-					devID := strings.TrimPrefix(data, "deldev_")
+					callbackToken := strings.TrimPrefix(data, "deldev_")
 					var peerErr error
 					dbMutex.Lock()
-					dev, exists := db.Devices[devID]
+					devID, dev, exists := findMainDeviceByCallbackToken(db, callbackToken)
 					if exists {
 						peerErr = removePeerFromWG(wgDev, dev)
 						if peerErr == nil {
 							delete(db.Devices, devID)
-							for _, entry := range db.Passwords {
-								if entry != nil && entry.DeviceID == devID {
-									entry.DeviceID = ""
-								}
-							}
 							saveDBLazy()
 						}
 					}
 					dbMutex.Unlock()
-					if peerErr != nil {
+					if !exists {
+						sendTelegram(token, adminID, "❌ Устройство главного пароля не найдено или список уже устарел", nil)
+					} else if peerErr != nil {
 						log.Printf("[WG] Удаление устройства %s: %v", devID, peerErr)
 						sendTelegram(token, adminID, fmt.Sprintf("❌ Не удалось удалить WireGuard peer устройства `%s`", devID), nil)
 					} else {
@@ -1048,13 +1090,32 @@ func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
 	}
 
 	txt := "🔐 *Пароли:*\n\n"
-	txt += fmt.Sprintf("🔒 Главный: `%s` (владелец)\n\n", db.MainPassword)
+	txt += fmt.Sprintf("🔒 Главный: `%s` (владелец)\n", db.MainPassword)
 
 	var inlineKb []map[string]interface{}
 	inlineKb = append(inlineKb, map[string]interface{}{
 		"text":          "🔗 Ссылка на главный пароль",
 		"callback_data": "mainlink",
 	})
+	mainDevices := mainDeviceIDs(db)
+	if len(mainDevices) == 0 {
+		txt += "📱 Устройства: _нет_\n\n"
+	} else {
+		txt += fmt.Sprintf("📱 Устройства главного пароля: %d\n", len(mainDevices))
+		for _, deviceID := range mainDevices {
+			dev := db.Devices[deviceID]
+			txt += fmt.Sprintf("• `%s` — `%s`\n", deviceID, dev.IP)
+			label := deviceID
+			if len(label) > 20 {
+				label = label[:20] + "…"
+			}
+			inlineKb = append(inlineKb, map[string]interface{}{
+				"text":          "🗑 " + label,
+				"callback_data": "deldev_" + deviceCallbackToken(deviceID),
+			})
+		}
+		txt += "\n"
+	}
 
 	if len(db.Passwords) == 0 {
 		txt += "_Нет сгенерированных паролей._\n"
