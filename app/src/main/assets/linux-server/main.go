@@ -51,7 +51,9 @@ func main() {
 		os.Exit(0)
 	}()
 
-	initDB(*configDir, *mainPass, *adminID, *botToken)
+	if err := initDB(*configDir, *mainPass, *adminID, *botToken); err != nil {
+		log.Fatalf("[DB] Запуск: %v", err)
+	}
 
 	keys, err := loadOrGenerateKeys(*configDir)
 	if err != nil {

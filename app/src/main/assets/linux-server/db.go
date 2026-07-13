@@ -258,31 +258,40 @@ func refreshWrapKeysFromDBLocked() error {
 	return serverWrapKeys.SetPasswords(db.MainPassword, passwords)
 }
 
-func initDB(dir, mainPass, adminID, botToken string) {
+func initDB(dir, mainPass, adminID, botToken string) error {
 	dbFile = filepath.Join(dir, "passwords.json")
-	db = &Database{
+	loaded := &Database{
 		Passwords: make(map[string]*PasswordEntry),
 		Devices:   make(map[string]*ClientDevice),
 	}
 	data, err := os.ReadFile(dbFile)
 	if err == nil {
-		json.Unmarshal(data, db)
+		if len(bytes.TrimSpace(data)) == 0 {
+			return fmt.Errorf("database %s is empty", dbFile)
+		}
+		if err := json.Unmarshal(data, loaded); err != nil {
+			return fmt.Errorf("decode database %s: %w", dbFile, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read database %s: %w", dbFile, err)
 	}
-	if db.Passwords == nil {
-		db.Passwords = make(map[string]*PasswordEntry)
+	if loaded.Passwords == nil {
+		loaded.Passwords = make(map[string]*PasswordEntry)
 	}
-	if db.Devices == nil {
-		db.Devices = make(map[string]*ClientDevice)
+	if loaded.Devices == nil {
+		loaded.Devices = make(map[string]*ClientDevice)
 	}
-	db.MainPassword = mainPass
-	db.AdminID = adminID
-	db.BotToken = botToken
+	loaded.MainPassword = mainPass
+	loaded.AdminID = adminID
+	loaded.BotToken = botToken
+	db = loaded
 	if err := saveDBSync(); err != nil {
-		log.Printf("[DB] initial save: %v", err)
+		return fmt.Errorf("initial database save: %w", err)
 	}
 	if err := refreshWrapKeysFromDBLocked(); err != nil {
-		log.Fatalf("[WRAP] init keys: %v", err)
+		return fmt.Errorf("initialize WRAP keys: %w", err)
 	}
+	return nil
 }
 
 func saveDBLazy() {
