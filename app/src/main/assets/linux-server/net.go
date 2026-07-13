@@ -63,6 +63,7 @@ var (
 	totalBytesToClient   int64
 	activeConns          int32
 	totalConns           int64
+	rejectedConns        int64
 	natType              string = "Инициализация..."
 	serverStartTime      time.Time
 )
@@ -84,6 +85,7 @@ func statsLoop(ctx context.Context, configDir string) {
 			toC := atomic.LoadInt64(&totalBytesToClient)
 			active := atomic.LoadInt32(&activeConns)
 			total := atomic.LoadInt64(&totalConns)
+			rejected := atomic.LoadInt64(&rejectedConns)
 			uptime := time.Since(serverStartTime)
 
 			dbMutex.Lock()
@@ -95,12 +97,13 @@ func statsLoop(ctx context.Context, configDir string) {
 			downGB := float64(toC) / (1024 * 1024 * 1024)
 			upGB := float64(fromC) / (1024 * 1024 * 1024)
 
-			log.Printf("[СТАТ] Активных: %d | Всего соединений: %d | Uptime: %s | Получено: %.2f GB | Отправлено: %.2f GB | Паролей: %d | Устройств: %d",
-				active, total, uptimeStr, downGB, upGB, numPasswords, numDevices)
+			log.Printf("[СТАТ] Активных: %d | Всего соединений: %d | Отклонено лимитом: %d | Uptime: %s | Получено: %.2f GB | Отправлено: %.2f GB | Паролей: %d | Устройств: %d",
+				active, total, rejected, uptimeStr, downGB, upGB, numPasswords, numDevices)
 
 			statsJSON, _ := json.Marshal(map[string]interface{}{
 				"active":    active,
 				"total":     total,
+				"rejected":  rejected,
 				"nat":       natType,
 				"uptime":    uptimeStr,
 				"down_gb":   fmt.Sprintf("%.2f", downGB),
@@ -581,7 +584,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 		return
 	}
 
-	hctx, hcancel := context.WithTimeout(ctx, 30*time.Second)
+	hctx, hcancel := context.WithTimeout(ctx, dtlsHandshakeTimeout)
 	if err := dtlsConn.HandshakeContext(hctx); err != nil {
 		hcancel()
 		return

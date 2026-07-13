@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"time"
 )
 
 const (
@@ -11,6 +12,7 @@ const (
 	defaultInternalWGPort = 56001
 	wgMTU                 = 1280
 	keepalive             = 25
+	dtlsHandshakeTimeout  = 15 * time.Second
 )
 
 var dns = "1.1.1.1"

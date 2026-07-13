@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/pion/dtls/v3"
@@ -26,7 +27,16 @@ func main() {
 	adminID := flag.String("admin", "", "Telegram Admin ID")
 	botToken := flag.String("bot-token", "", "Telegram Bot Token")
 	dnsFlag := flag.String("dns", dns, "DNS для клиента (можно несколько через запятую)")
+	maxConnections := flag.Int("max-connections", 512, "максимум одновременных DTLS-соединений")
+	handshakeRate := flag.Int("handshake-rate", 64, "максимум новых DTLS handshakes в секунду")
 	flag.Parse()
+	if *maxConnections < 1 || *maxConnections > 10000 {
+		log.Fatalf("[CONFIG] max-connections должен быть от 1 до 10000")
+	}
+	if *handshakeRate < 1 || *handshakeRate > 10000 {
+		log.Fatalf("[CONFIG] handshake-rate должен быть от 1 до 10000")
+	}
+	connectionLimit := newConnectionLimiter(*maxConnections, *handshakeRate)
 
 	if v := strings.TrimSpace(*dnsFlag); v != "" {
 		dns = v
@@ -112,6 +122,7 @@ func main() {
 
 	log.Printf("   DTLS: %s | WG: %s | NAT: %s", *listen, wgEndpoint, natType)
 	log.Printf("   WRAP: password HKDF + RTP AEAD | keys: %d", serverWrapKeys.Count())
+	log.Printf("   LIMITS: connections=%d | handshakes=%d/s", *maxConnections, *handshakeRate)
 	log.Println("[SERVER] Готов")
 
 	for {
@@ -128,9 +139,15 @@ func main() {
 			}
 			continue
 		}
+		if !connectionLimit.TryAcquire() {
+			atomic.AddInt64(&rejectedConns, 1)
+			dtlsConn.Close()
+			continue
+		}
 		workers.Add(1)
 		go func(c net.Conn) {
 			defer workers.Done()
+			defer connectionLimit.Release()
 			defer c.Close()
 			handleConn(ctx, c, wrapListener, wgEndpoint, wgDev, keys)
 		}(dtlsConn)
