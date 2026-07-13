@@ -1,0 +1,12 @@
+local.properties
+
+# Release signing keys must never be committed.
+*.jks
+*.keystore
+*.p12
+*.pfx
+
+# Local Android/Gradle output.
+.gradle/
+**/build/
+app/release/

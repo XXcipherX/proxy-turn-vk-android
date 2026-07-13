@@ -79,24 +79,106 @@ jobs:
           scripts/build_server.sh
           scripts/build_client.sh
 
-      - name: Generate temporary release keystore
+      - name: Resolve Android version code
+        id: android_version
         shell: bash
         run: |
           set -euo pipefail
-          keytool -genkeypair -v -keystore release.keystore -storetype PKCS12 \
-            -storepass wdtt_temp_release_password -keypass wdtt_temp_release_password \
-            -alias wdtt-release -keyalg RSA -keysize 4096 -validity 10000 \
-            -dname "CN=WDTT,O=WDTT,C=LV"
-          cat > local.properties <<'EOF'
-          KEYSTORE_FILE=../release.keystore
-          KEYSTORE_PASSWORD=wdtt_temp_release_password
-          KEY_ALIAS=wdtt-release
-          KEY_PASSWORD=wdtt_temp_release_password
-          EOF
+          source_version_code="$(sed -nE 's/^[[:space:]]*val defaultVersionCode = ([0-9]+).*/\1/p' app/build.gradle.kts | head -n 1)"
+          if ! [[ "$source_version_code" =~ ^[0-9]+$ ]]; then
+            echo "Unable to read the source versionCode from app/build.gradle.kts"
+            exit 1
+          fi
+          if (( GITHUB_RUN_NUMBER >= 100000 )); then
+            echo "GITHUB_RUN_NUMBER is too large for the automatic versionCode scheme"
+            exit 1
+          fi
+          version_code=$((source_version_code * 100000 + GITHUB_RUN_NUMBER))
+          if (( version_code > 2100000000 )); then
+            echo "Calculated versionCode exceeds Android's limit: $version_code"
+            exit 1
+          fi
+          echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
+          printf '### Android release\n\n- versionCode: %s\n' "$version_code" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore permanent release keystore
+        id: release_keystore
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for variable in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!variable:-}" ]; then
+              echo "Required GitHub Actions secret is missing: ANDROID_${variable}"
+              exit 1
+            fi
+          done
+          keystore_path="${RUNNER_TEMP}/wdtt-release.keystore"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          chmod 600 "$keystore_path"
+          keytool -list -keystore "$keystore_path" -storepass "$KEYSTORE_PASSWORD" \
+            -alias "$KEY_ALIAS" >/dev/null
+          echo "keystore_path=$keystore_path" >> "$GITHUB_OUTPUT"
 
       - name: Build Android release APKs
         shell: bash
-        run: ./gradlew clean :app:assembleRelease --no-daemon --stacktrace
+        env:
+          KEYSTORE_FILE: ${{ steps.release_keystore.outputs.keystore_path }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ./gradlew clean :app:assembleRelease \
+            -PrequireReleaseSigning=true \
+            -PreleaseVersionCode=${{ steps.android_version.outputs.version_code }} \
+            --no-daemon --stacktrace
+
+      - name: Verify APK signatures and version code
+        shell: bash
+        env:
+          KEYSTORE_PATH: ${{ steps.release_keystore.outputs.keystore_path }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          EXPECTED_VERSION_CODE: ${{ steps.android_version.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          apksigner="${ANDROID_SDK_ROOT}/build-tools/${ANDROID_BUILD_TOOLS}/apksigner"
+          aapt="${ANDROID_SDK_ROOT}/build-tools/${ANDROID_BUILD_TOOLS}/aapt"
+          expected_cert_sha256="$(
+            keytool -exportcert -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" \
+              -alias "$KEY_ALIAS" | sha256sum | awk '{print $1}'
+          )"
+          mapfile -t apks < <(find app/build/outputs/apk/release -type f -name '*.apk' | sort)
+          if [ "${#apks[@]}" -eq 0 ]; then
+            echo "No release APKs were generated"
+            exit 1
+          fi
+          for apk in "${apks[@]}"; do
+            "$apksigner" verify --verbose "$apk"
+            actual_cert_sha256="$(
+              "$apksigner" verify --print-certs "$apk" |
+                sed -n 's/^Signer #1 certificate SHA-256 digest: //p' |
+                head -n 1 | tr '[:upper:]' '[:lower:]'
+            )"
+            if [ "$actual_cert_sha256" != "$expected_cert_sha256" ]; then
+              echo "Signing certificate mismatch: $apk"
+              exit 1
+            fi
+            actual_version_code="$(
+              "$aapt" dump badging "$apk" |
+                sed -n "s/^package:.*versionCode='\([^']*\)'.*/\1/p"
+            )"
+            if [ "$actual_version_code" != "$EXPECTED_VERSION_CODE" ]; then
+              echo "versionCode mismatch in $apk: expected $EXPECTED_VERSION_CODE, got $actual_version_code"
+              exit 1
+            fi
+          done
+          printf -- '- signing certificate SHA-256: %s\n- verified APKs: %s\n' \
+            "$expected_cert_sha256" "${#apks[@]}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Prepare release assets and changelog
         id: release_meta
@@ -167,3 +249,13 @@ jobs:
             build/go-client/*
           if-no-files-found: error
           retention-days: 14
+
+      - name: Remove release keystore
+        if: always()
+        shell: bash
+        env:
+          KEYSTORE_PATH: ${{ steps.release_keystore.outputs.keystore_path }}
+        run: |
+          if [ -n "${KEYSTORE_PATH:-}" ] && [ -f "$KEYSTORE_PATH" ]; then
+            shred -u "$KEYSTORE_PATH" || rm -f "$KEYSTORE_PATH"
+          fi

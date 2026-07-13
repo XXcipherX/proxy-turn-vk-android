@@ -1,0 +1,6 @@
+# Optional local release signing. Copy this file to local.properties and fill in
+# the values locally. Never commit local.properties or the keystore.
+KEYSTORE_FILE=release.keystore
+KEYSTORE_PASSWORD=change-me
+KEY_ALIAS=wdtt-release
+KEY_PASSWORD=change-me

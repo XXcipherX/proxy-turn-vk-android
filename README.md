@@ -240,6 +240,51 @@ export ANDROID_NDK_HOME=/path/to/android-ndk
 
 Одна ABI: `./scripts/build-go-lib.sh arm64-v8a`
 
+### Подписанная сборка через GitHub Actions
+
+Ручной workflow `Build WDTT Release` подписывает все APK одним постоянным
+release-ключом. Перед первым запуском создайте ключ один раз на доверенном
+компьютере с установленным JDK:
+
+```powershell
+keytool -genkeypair -v -keystore wdtt-release.p12 -storetype PKCS12 `
+  -alias wdtt-release -keyalg RSA -keysize 4096 -validity 10000 `
+  -dname "CN=WDTT,O=WDTT"
+```
+
+`keytool` интерактивно запросит пароль, поэтому он не попадёт в историю
+PowerShell. Для PKCS12 используйте этот же пароль в обоих парольных secrets.
+
+Создайте минимум две резервные копии `wdtt-release.p12` вне репозитория и
+сохраните пароль. Потеря ключа сделает невозможным обновление уже установленных
+APK. Сам ключ нельзя коммитить в Git.
+
+Преобразуйте ключ в Base64 и скопируйте результат в буфер обмена:
+
+```powershell
+[Convert]::ToBase64String(
+  [IO.File]::ReadAllBytes((Resolve-Path .\wdtt-release.p12))
+) | Set-Clipboard
+```
+
+В `Settings → Secrets and variables → Actions` добавьте четыре repository
+secret:
+
+- `ANDROID_KEYSTORE_BASE64` — Base64 из буфера обмена;
+- `ANDROID_KEYSTORE_PASSWORD` — пароль хранилища;
+- `ANDROID_KEY_ALIAS` — `wdtt-release`;
+- `ANDROID_KEY_PASSWORD` — пароль ключа.
+
+После этого запускайте `Actions → Build WDTT Release → Run workflow`.
+Workflow не публикует APK при отсутствии секретов, проверяет подпись каждого
+файла и автоматически вычисляет возрастающий `versionCode` как исходный
+`versionCode × 100000 + GITHUB_RUN_NUMBER`.
+
+APK, созданный прежним workflow с одноразовым временным ключом, обновить поверх
+установленной версии невозможно. Один раз удалите такую версию и установите APK,
+подписанный постоянным ключом. Все последующие сборки можно будет устанавливать
+поверх неё без удаления приложения и потери его данных.
+
 > [!WARNING]
 > ### Назначение проекта и дисклеймер
 > Приложение является техническим инструментом для защищённого туннелирования трафика через ваш собственный TURN-сервер. Проект WDTT носит исключительно витринно-ознакомительный характер на примере уже имеющейся структуры в целях исследования сетевых протоколов.

@@ -5,6 +5,53 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val defaultVersionCode = 124
+val releaseVersionCode = providers.gradleProperty("releaseVersionCode").orNull?.let { rawValue ->
+    val parsedValue = rawValue.toLongOrNull()
+        ?: throw GradleException("releaseVersionCode must be a decimal integer, got: $rawValue")
+    if (parsedValue !in 1..2_100_000_000) {
+        throw GradleException("releaseVersionCode must be between 1 and 2100000000, got: $rawValue")
+    }
+    parsedValue.toInt()
+} ?: defaultVersionCode
+
+val requireReleaseSigning = providers.gradleProperty("requireReleaseSigning")
+    .orNull
+    ?.equals("true", ignoreCase = true)
+    ?: false
+
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.inputStream().use { input -> localProperties.load(input) }
+}
+
+fun signingValue(name: String): String? =
+    providers.environmentVariable(name).orNull?.takeIf { it.isNotEmpty() }
+        ?: localProperties.getProperty(name)?.takeIf { it.isNotEmpty() }
+
+val releaseKeystorePath = signingValue("KEYSTORE_FILE")
+val releaseKeystorePassword = signingValue("KEYSTORE_PASSWORD")
+val releaseKeyAlias = signingValue("KEY_ALIAS")
+val releaseKeyPassword = signingValue("KEY_PASSWORD")
+val releaseKeystoreFile = releaseKeystorePath?.let { configuredPath ->
+    // Keep compatibility with the historical ../release.keystore value, which
+    // referred to release.keystore in the repository root.
+    val rootRelativePath = configuredPath.removePrefix("../").removePrefix("..\\")
+    rootProject.file(rootRelativePath)
+}
+val hasReleaseSigning = releaseKeystoreFile?.isFile == true &&
+    releaseKeystorePassword != null &&
+    releaseKeyAlias != null &&
+    releaseKeyPassword != null
+
+if (requireReleaseSigning && !hasReleaseSigning) {
+    throw GradleException(
+        "Release signing is required, but KEYSTORE_FILE, KEYSTORE_PASSWORD, " +
+            "KEY_ALIAS or KEY_PASSWORD is missing/invalid"
+    )
+}
+
 android {
     namespace = "com.wdtt.client"
     compileSdk = 35
@@ -13,7 +60,7 @@ android {
         applicationId = "com.wdtt.client"
         minSdk = 28
         targetSdk = 35
-        versionCode = 124
+        versionCode = releaseVersionCode
         versionName = "1.2.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -35,31 +82,13 @@ android {
         }
     }
 
-    val localProperties = Properties()
-    val localPropertiesFile = rootProject.file("local.properties")
-    if (localPropertiesFile.exists()) {
-        localProperties.load(localPropertiesFile.inputStream())
-    }
-
     signingConfigs {
         create("release") {
-            val keyFile = localProperties.getProperty("KEYSTORE_FILE")
-            if (keyFile != null) {
-                // Резолвим путь: если начинается с "..", берём от корня проекта
-                val resolvedFile = if (keyFile.startsWith("..")) {
-                    // ../release.keystore -> корень проекта / release.keystore
-                    file(rootDir.resolve(keyFile.substring(3)))
-                } else {
-                    file(keyFile)
-                }
-                if (resolvedFile.exists()) {
-                    storeFile = resolvedFile
-                    storePassword = localProperties.getProperty("KEYSTORE_PASSWORD")
-                    keyAlias = localProperties.getProperty("KEY_ALIAS")
-                    keyPassword = localProperties.getProperty("KEY_PASSWORD")
-                } else {
-                    println("WARNING: Keystore file not found: $keyFile (resolved: ${resolvedFile.absolutePath})")
-                }
+            if (hasReleaseSigning) {
+                storeFile = releaseKeystoreFile
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
             enableV1Signing = true
             enableV2Signing = true
@@ -75,19 +104,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            val keyFile = localProperties.getProperty("KEYSTORE_FILE")
-            val resolvedFile = if (keyFile != null && keyFile.startsWith("..")) {
-                file(rootDir.resolve(keyFile.substring(3)))
-            } else if (keyFile != null) {
-                file(keyFile)
-            } else null
-            
-            if (resolvedFile != null && resolvedFile.exists()) {
+            if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
-                println("✅ Signing config applied: ${resolvedFile.absolutePath}")
+                println("Signing config applied: ${releaseKeystoreFile?.absolutePath}")
             } else {
-                println("⚠️ WARNING: Keystore not found, using debug signing")
-                println("   Looked for: ${resolvedFile?.absolutePath ?: keyFile}")
+                println("WARNING: Release signing is not configured; the release APK will be unsigned")
+                println("Looked for: ${releaseKeystoreFile?.absolutePath ?: releaseKeystorePath}")
             }
         }
     }
