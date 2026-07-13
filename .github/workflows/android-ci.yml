@@ -1,0 +1,109 @@
+name: Android CI
+
+on:
+  push:
+    paths:
+      - "app/**"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle.properties"
+      - "gradle/**"
+      - "gradlew"
+      - "gradlew.bat"
+      - "scripts/build_client.sh"
+      - "scripts/build-go-lib.sh"
+      - ".github/workflows/android-ci.yml"
+      - ".github/workflows/build-release.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle.properties"
+      - "gradle/**"
+      - "gradlew"
+      - "gradlew.bat"
+      - "scripts/build_client.sh"
+      - "scripts/build-go-lib.sh"
+      - ".github/workflows/android-ci.yml"
+      - ".github/workflows/build-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_NATIVE_API_LEVEL: "28"
+  ANDROID_COMPILE_SDK: "35"
+  ANDROID_BUILD_TOOLS: "35.0.0"
+  ANDROID_NDK_VERSION: "27.2.12479018"
+
+jobs:
+  build:
+    name: Android native and release build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v6
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-${ANDROID_COMPILE_SDK}" "build-tools;${ANDROID_BUILD_TOOLS}" "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+          cache-dependency-path: app/src/main/assets/android-client/go.sum
+
+      - name: Verify Android Go module
+        working-directory: app/src/main/assets/android-client
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod verify
+          go test ./...
+
+      - name: Build Android native client
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/build_client.sh scripts/build-go-lib.sh gradlew
+          scripts/build_client.sh
+          git diff --exit-code -- app/src/main/assets/android-client/go.mod app/src/main/assets/android-client/go.sum
+
+      - name: Configure Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Test, lint and build release APKs
+        shell: bash
+        run: ./gradlew :app:testDebugUnitTest :app:lintRelease :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Upload release APKs
+        uses: actions/upload-artifact@v7
+        with:
+          name: WDTT-unsigned-release-apks
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 7

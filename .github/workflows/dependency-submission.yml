@@ -1,0 +1,52 @@
+name: Gradle Dependency Submission
+
+on:
+  push:
+    branches:
+      - main-new
+    paths:
+      - "app/build.gradle.kts"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle.properties"
+      - "gradle/**"
+      - "gradlew"
+      - "gradlew.bat"
+      - ".github/workflows/dependency-submission.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gradle-dependency-submission-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_COMPILE_SDK: "35"
+  ANDROID_BUILD_TOOLS: "35.0.0"
+
+jobs:
+  submit:
+    name: Submit Gradle dependency graph
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager "platforms;android-${ANDROID_COMPILE_SDK}" "build-tools;${ANDROID_BUILD_TOOLS}"
+
+      - name: Generate and submit Gradle dependency graph
+        uses: gradle/actions/dependency-submission@v6
