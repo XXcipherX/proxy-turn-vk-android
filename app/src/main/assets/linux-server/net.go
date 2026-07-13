@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -206,28 +207,108 @@ func generateKeyPair() (privB64, pubB64 string, err error) {
 		base64.StdEncoding.EncodeToString(pub), nil
 }
 
+func validateKeyPair(privateKey, publicKey string) error {
+	privateRaw, err := base64.StdEncoding.DecodeString(privateKey)
+	if err != nil || len(privateRaw) != 32 {
+		return errors.New("invalid private key")
+	}
+	publicRaw, err := base64.StdEncoding.DecodeString(publicKey)
+	if err != nil || len(publicRaw) != 32 {
+		return errors.New("invalid public key")
+	}
+	derivedPublic, err := curve25519.X25519(privateRaw, curve25519.Basepoint)
+	if err != nil {
+		return fmt.Errorf("derive public key: %w", err)
+	}
+	if !bytes.Equal(derivedPublic, publicRaw) {
+		return errors.New("public key does not match private key")
+	}
+	return nil
+}
+
+func validateWGKeys(keys *wgKeys) error {
+	if keys == nil {
+		return errors.New("missing keys")
+	}
+	if err := validateKeyPair(keys.serverPrivate, keys.serverPublic); err != nil {
+		return fmt.Errorf("server key pair: %w", err)
+	}
+	if err := validateKeyPair(keys.clientPrivate, keys.clientPublic); err != nil {
+		return fmt.Errorf("client key pair: %w", err)
+	}
+	return nil
+}
+
+func writeWGKeysAtomic(dir, path string, keys *wgKeys) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create key directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return fmt.Errorf("secure key directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".wg-keys-*")
+	if err != nil {
+		return fmt.Errorf("create temporary key file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("secure temporary key file: %w", err)
+	}
+	content := fmt.Sprintf("%s\n%s\n%s\n%s\n",
+		keys.serverPrivate, keys.serverPublic,
+		keys.clientPrivate, keys.clientPublic)
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temporary key file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync temporary key file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary key file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("install key file: %w", err)
+	}
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open key directory for sync: %w", err)
+	}
+	defer dirHandle.Close()
+	if err := dirHandle.Sync(); err != nil {
+		return fmt.Errorf("sync key directory: %w", err)
+	}
+	return nil
+}
+
 func loadOrGenerateKeys(dir string) (*wgKeys, error) {
 	f := filepath.Join(dir, "wg-keys.dat")
-	if data, err := os.ReadFile(f); err == nil {
+	data, err := os.ReadFile(f)
+	if err == nil {
 		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-		if len(lines) >= 4 {
-			keys := &wgKeys{
-				serverPrivate: strings.TrimSpace(lines[0]),
-				serverPublic:  strings.TrimSpace(lines[1]),
-				clientPrivate: strings.TrimSpace(lines[2]),
-				clientPublic:  strings.TrimSpace(lines[3]),
-			}
-			for _, k := range []string{keys.serverPrivate, keys.serverPublic,
-				keys.clientPrivate, keys.clientPublic} {
-				if _, err := b64ToHex(k); err != nil {
-					goto generate
-				}
-			}
-			log.Printf("[WG] Ключи загружены из %s", f)
-			return keys, nil
+		if len(lines) != 4 {
+			return nil, fmt.Errorf("invalid key file %s: expected 4 lines, got %d", f, len(lines))
 		}
+		keys := &wgKeys{
+			serverPrivate: strings.TrimSpace(lines[0]),
+			serverPublic:  strings.TrimSpace(lines[1]),
+			clientPrivate: strings.TrimSpace(lines[2]),
+			clientPublic:  strings.TrimSpace(lines[3]),
+		}
+		if err := validateWGKeys(keys); err != nil {
+			return nil, fmt.Errorf("invalid key file %s: %w", f, err)
+		}
+		log.Printf("[WG] Ключи загружены из %s", f)
+		return keys, nil
 	}
-generate:
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read key file %s: %w", f, err)
+	}
+
 	log.Println("[WG] Генерирую новые ключи...")
 	sPriv, sPub, err := generateKeyPair()
 	if err != nil {
@@ -237,11 +318,18 @@ generate:
 	if err != nil {
 		return nil, err
 	}
-	keys := &wgKeys{sPriv, sPub, cPriv, cPub}
-	os.MkdirAll(dir, 0700)
-	os.WriteFile(f, []byte(fmt.Sprintf("%s\n%s\n%s\n%s\n",
-		keys.serverPrivate, keys.serverPublic,
-		keys.clientPrivate, keys.clientPublic)), 0600)
+	keys := &wgKeys{
+		serverPrivate: sPriv,
+		serverPublic:  sPub,
+		clientPrivate: cPriv,
+		clientPublic:  cPub,
+	}
+	if err := validateWGKeys(keys); err != nil {
+		return nil, fmt.Errorf("validate generated keys: %w", err)
+	}
+	if err := writeWGKeysAtomic(dir, f, keys); err != nil {
+		return nil, err
+	}
 	log.Printf("[WG] Ключи сохранены в %s", f)
 	return keys, nil
 }
