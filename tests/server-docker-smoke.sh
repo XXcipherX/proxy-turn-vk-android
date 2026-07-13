@@ -24,7 +24,7 @@ wait_ready() {
       echo "WDTT container exited before readiness" >&2
       return 1
     fi
-    if docker logs "$CONTAINER" 2>&1 | grep -Fq '[SERVER] Готов'; then
+    if docker logs "$CONTAINER" 2>&1 | grep -F '[SERVER] Готов' >/dev/null; then
       return 0
     fi
     sleep 1
@@ -107,7 +107,7 @@ if [ "$keys_before" != "$keys_after" ]; then
   echo "WireGuard keys changed after restart" >&2
   exit 1
 fi
-docker logs "$CONTAINER" 2>&1 | grep -Fq '[WG] Восстановлено сохранённых устройств: 1'
+docker logs "$CONTAINER" 2>&1 | grep -F '[WG] Восстановлено сохранённых устройств: 1' >/dev/null
 
 (
   cd "$SERVER_DIR"

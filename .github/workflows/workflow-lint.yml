@@ -2,6 +2,8 @@ name: Workflow lint
 
 on:
   push:
+    branches:
+      - main-new
     paths:
       - ".github/dependabot.yml"
       - ".github/workflows/**"

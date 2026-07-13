@@ -2,6 +2,8 @@ name: Docker CI
 
 on:
   push:
+    branches:
+      - main-new
     paths:
       - "Dockerfile"
       - "app/src/main/assets/linux-server/**"
