@@ -1164,14 +1164,17 @@ func maskPassword(pass string) string {
 	return pass[:3] + "****"
 }
 
-var telegramHTTPClient = &http.Client{Timeout: 15 * time.Second}
+var (
+	telegramHTTPClient = &http.Client{Timeout: 15 * time.Second}
+	telegramAPIBaseURL = "https://api.telegram.org"
+)
 
 func postTelegram(token, method string, payload interface{}) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("encode request: %w", err)
 	}
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/%s", token, method)
+	url := fmt.Sprintf("%s/bot%s/%s", strings.TrimRight(telegramAPIBaseURL, "/"), token, method)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
@@ -1199,7 +1202,8 @@ func postTelegram(token, method string, payload interface{}) error {
 		return fmt.Errorf("decode response: %w", err)
 	}
 	if !telegramResult.OK {
-		return fmt.Errorf("API rejected request: %s", telegramResult.Description)
+		detail := strings.ReplaceAll(telegramResult.Description, token, "<redacted>")
+		return fmt.Errorf("API rejected request: %s", detail)
 	}
 	return nil
 }

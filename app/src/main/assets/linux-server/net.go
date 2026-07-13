@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -573,6 +574,40 @@ PersistentKeepalive = %d`,
 	)
 }
 
+type getConfRequest struct {
+	ClientPort string
+	DeviceID   string
+	Password   string
+}
+
+func parseGetConfRequest(packet []byte) (getConfRequest, bool, error) {
+	const prefix = "GETCONF:"
+	raw := string(packet)
+	if !strings.HasPrefix(raw, prefix) {
+		return getConfRequest{}, false, nil
+	}
+
+	parts := strings.Split(strings.TrimSpace(strings.TrimPrefix(raw, prefix)), "|")
+	if len(parts) != 3 {
+		return getConfRequest{}, true, errors.New("GETCONF must contain port, device ID and password")
+	}
+	port, err := strconv.Atoi(parts[0])
+	if err != nil || port < 1 || port > 65535 {
+		return getConfRequest{}, true, errors.New("GETCONF contains an invalid client port")
+	}
+	if len(parts[1]) == 0 || len(parts[1]) > 128 {
+		return getConfRequest{}, true, errors.New("GETCONF contains an invalid device ID")
+	}
+	if len(parts[2]) == 0 || len(parts[2]) > 128 {
+		return getConfRequest{}, true, errors.New("GETCONF contains an invalid password")
+	}
+	return getConfRequest{
+		ClientPort: parts[0],
+		DeviceID:   parts[1],
+		Password:   parts[2],
+	}, true, nil
+}
+
 func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacketListener, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
 	// Добавлен defer для предотвращения утечки сокетов при ошибках на любом этапе функции
 	defer clientConn.Close()
@@ -632,20 +667,16 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 	firstPacket := buf[:n]
 	firstStr := string(firstPacket)
 
-	if strings.HasPrefix(firstStr, "GETCONF:") {
-		parts := strings.Split(strings.TrimSpace(strings.TrimPrefix(firstStr, "GETCONF:")), "|")
-		clientPort := "9000"
-		deviceID := "unknown"
-		password := ""
-		if len(parts) > 0 {
-			clientPort = parts[0]
+	getConf, isGetConf, getConfErr := parseGetConfRequest(firstPacket)
+	if isGetConf {
+		if getConfErr != nil {
+			_, _ = clientConn.Write([]byte("DENIED:malformed_getconf"))
+			log.Printf("[WG] Отказ: некорректный GETCONF от %s: %v", clientConn.RemoteAddr(), getConfErr)
+			return
 		}
-		if len(parts) > 1 {
-			deviceID = parts[1]
-		}
-		if len(parts) > 2 {
-			password = parts[2]
-		}
+		clientPort := getConf.ClientPort
+		deviceID := getConf.DeviceID
+		password := getConf.Password
 
 		if password != connPassword {
 			_, _ = clientConn.Write([]byte("DENIED:password_mismatch"))

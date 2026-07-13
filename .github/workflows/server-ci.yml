@@ -1,0 +1,190 @@
+name: Server CI
+
+on:
+  push:
+    paths:
+      - "app/src/main/assets/linux-server/**"
+      - "Dockerfile"
+      - "scripts/build_server.sh"
+      - "tests/server-docker-smoke.sh"
+      - ".github/workflows/server-ci.yml"
+  pull_request:
+    paths:
+      - "app/src/main/assets/linux-server/**"
+      - "Dockerfile"
+      - "scripts/build_server.sh"
+      - "tests/server-docker-smoke.sh"
+      - ".github/workflows/server-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SERVER_DIR: app/src/main/assets/linux-server
+  GO_VERSION: 1.26.x
+
+jobs:
+  unit:
+    name: Unit tests and vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ env.SERVER_DIR }}/go.sum
+
+      - name: Verify modules
+        working-directory: ${{ env.SERVER_DIR }}
+        run: go mod verify
+
+      - name: Vet server
+        working-directory: ${{ env.SERVER_DIR }}
+        run: go vet ./...
+
+      - name: Run unit and contract tests
+        working-directory: ${{ env.SERVER_DIR }}
+        run: go test -mod=readonly -count=1 -shuffle=on -timeout=3m -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Validate smoke script syntax
+        run: bash -n tests/server-docker-smoke.sh
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: server-coverage
+          path: ${{ env.SERVER_DIR }}/coverage.out
+          if-no-files-found: error
+          retention-days: 14
+
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ env.SERVER_DIR }}/go.sum
+
+      - name: Run race-enabled tests
+        working-directory: ${{ env.SERVER_DIR }}
+        run: go test -mod=readonly -race -count=1 -shuffle=on -timeout=8m ./...
+
+  build:
+    name: Build Go ${{ matrix.go }} linux/${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - go: 1.25.x
+            arch: amd64
+          - go: 1.26.x
+            arch: amd64
+          - go: 1.26.x
+            arch: arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+          cache-dependency-path: ${{ env.SERVER_DIR }}/go.sum
+
+      - name: Build static server
+        working-directory: ${{ env.SERVER_DIR }}
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: go build -mod=readonly -trimpath -ldflags="-s -w -checklinkname=0" -o "${RUNNER_TEMP}/wdtt-server-${GOARCH}" .
+
+  fuzz:
+    name: Protocol fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ env.SERVER_DIR }}/go.sum
+
+      - name: Fuzz RTP AEAD decoder
+        working-directory: ${{ env.SERVER_DIR }}
+        run: go test -mod=readonly -run='^$' -fuzz='^FuzzObfsUnwrap$' -fuzztime=20s -parallel=2 .
+
+      - name: Fuzz GETCONF parser
+        working-directory: ${{ env.SERVER_DIR }}
+        run: go test -mod=readonly -run='^$' -fuzz='^FuzzGetConfRequest$' -fuzztime=20s -parallel=2 .
+
+  vulnerabilities:
+    name: Go vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Scan reachable Go vulnerabilities
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: ${{ env.GO_VERSION }}
+          go-package: ./...
+          work-dir: ${{ env.SERVER_DIR }}
+          cache-dependency-path: ${{ env.SERVER_DIR }}/go.sum
+
+  docker-smoke:
+    name: Docker runtime and protocol smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - unit
+      - race
+      - build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ env.SERVER_DIR }}/go.sum
+
+      - name: Run privileged Docker smoke test
+        env:
+          WDTT_SMOKE_IMAGE: wdtt-server-ci:${{ github.sha }}
+        run: bash tests/server-docker-smoke.sh
+
+      - name: Scan container vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: wdtt-server-ci:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH

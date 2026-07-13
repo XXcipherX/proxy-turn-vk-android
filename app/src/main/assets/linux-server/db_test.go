@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -112,7 +115,59 @@ func TestInitDBCreatesMissingDatabase(t *testing.T) {
 	if err := initDB(dir, "Strong-Test_7kM9xQ2", "", ""); err != nil {
 		t.Fatalf("initDB: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "passwords.json")); err != nil {
+	info, err := os.Stat(filepath.Join(dir, "passwords.json"))
+	if err != nil {
 		t.Fatalf("database was not created: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("database permissions = %04o, want 0600", got)
+	}
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat database directory: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0700 {
+		t.Fatalf("database directory permissions = %04o, want 0700", got)
+	}
+}
+
+func TestConcurrentDatabasePersistence(t *testing.T) {
+	dir := t.TempDir()
+	if err := initDB(dir, "Strong-Test_7kM9xQ2", "", ""); err != nil {
+		t.Fatalf("initDB: %v", err)
+	}
+
+	const writers = 8
+	const devicesPerWriter = 16
+	var wg sync.WaitGroup
+	for writer := 0; writer < writers; writer++ {
+		writer := writer
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for device := 0; device < devicesPerWriter; device++ {
+				deviceID := fmt.Sprintf("ci-device-%02d-%02d", writer, device)
+				dbMutex.Lock()
+				db.Devices[deviceID] = &ClientDevice{DeviceID: deviceID, IP: "10.66.66.2"}
+				dbMutex.Unlock()
+				saveDBLazy()
+			}
+		}()
+	}
+	wg.Wait()
+	if err := flushDB(); err != nil {
+		t.Fatalf("flushDB: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "passwords.json"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var persisted Database
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("persisted database is invalid JSON: %v", err)
+	}
+	if got, want := len(persisted.Devices), writers*devicesPerWriter; got != want {
+		t.Fatalf("persisted devices = %d, want %d", got, want)
 	}
 }

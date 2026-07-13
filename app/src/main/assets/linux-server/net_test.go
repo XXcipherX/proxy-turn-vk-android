@@ -49,4 +49,11 @@ func TestLoadOrGenerateKeysPersistsValidPairs(t *testing.T) {
 	if *loaded != *generated {
 		t.Fatal("reloaded keys differ from generated keys")
 	}
+	info, err := os.Stat(filepath.Join(dir, "wg-keys.dat"))
+	if err != nil {
+		t.Fatalf("stat persisted keys: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("key permissions = %04o, want 0600", got)
+	}
 }
