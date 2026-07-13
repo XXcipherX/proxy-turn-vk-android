@@ -74,8 +74,8 @@ func TestObfsRoundTrip(t *testing.T) {
 		wire := dst[:wn]
 
 		
-		if wire[0] != 0xA0 {
-			t.Errorf("n=%d byte0=%#x, want 0xA0 (V=2,P=1)", n, wire[0])
+		if wire[0]>>6 != 2 {
+			t.Errorf("n=%d byte0=%#x, want RTP v2", n, wire[0])
 		}
 		if wire[1]&0x7F != 111 {
 			t.Errorf("n=%d PT=%d, want 111", n, wire[1]&0x7F)
@@ -92,6 +92,26 @@ func TestObfsRoundTrip(t *testing.T) {
 		if !bytes.Equal(out[:m], payload) {
 			t.Errorf("n=%d: payload mismatch after round trip", n)
 		}
+	}
+}
+
+func TestObfsRTPMetadataSelectors(t *testing.T) {
+	if !useRTPPadding(0) || useRTPPadding(1) {
+		t.Fatal("padding selector does not vary the RTP padding bit")
+	}
+	if !useRTPMarker(0) || useRTPMarker(1) {
+		t.Fatal("marker selector does not vary the RTP marker bit")
+	}
+	if rtpSequenceStep(1) != 1 || rtpSequenceStep(0) == 1 {
+		t.Fatal("sequence selector does not introduce occasional gaps")
+	}
+	steps := map[uint32]struct{}{
+		rtpTimestampStep(20*time.Millisecond, 0): struct{}{},
+		rtpTimestampStep(20*time.Millisecond, 1): struct{}{},
+		rtpTimestampStep(20*time.Millisecond, 2): struct{}{},
+	}
+	if len(steps) != 3 {
+		t.Fatalf("timestamp jitter did not produce distinct steps: %v", steps)
 	}
 }
 

@@ -59,10 +59,11 @@ type ObfsConfig struct {
 }
 
 type ObfsState struct {
-	mu      sync.Mutex
-	initSeq uint16
-	initTs  uint32
-	count   uint64
+	mu         sync.Mutex
+	seq        uint16
+	timestamp  uint32
+	lastPacket time.Time
+	count      uint64
 }
 
 func NewObfsConfig() *ObfsConfig {
@@ -79,10 +80,55 @@ func NewObfsState() *ObfsState {
 	var buf [6]byte
 	_, _ = rand.Read(buf[:])
 	return &ObfsState{
-		initSeq: binary.BigEndian.Uint16(buf[0:2]),
-		initTs:  binary.BigEndian.Uint32(buf[2:6]),
-		count:   0,
+		seq:       binary.BigEndian.Uint16(buf[0:2]),
+		timestamp: binary.BigEndian.Uint32(buf[2:6]),
 	}
+}
+
+func rtpTimestampStep(elapsed time.Duration, jitter byte) uint32 {
+	samples := int64(elapsed) * 48000 / int64(time.Second)
+	if samples < 120 {
+		samples = 120
+	} else if samples > 2880 {
+		samples = 2880
+	}
+	samples = ((samples + 60) / 120) * 120
+	samples += int64(int(jitter)%3-1) * 120
+	if samples < 120 {
+		samples = 120
+	} else if samples > 2880 {
+		samples = 2880
+	}
+	return uint32(samples)
+}
+
+func rtpSequenceStep(selector byte) uint16 {
+	if selector&0x7F == 0 {
+		return 2 + uint16(selector>>7)
+	}
+	return 1
+}
+
+func (s *ObfsState) nextHeader(now time.Time, jitter, sequenceSelector byte) (uint16, uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seq := s.seq
+	if s.count > 0 {
+		s.timestamp += rtpTimestampStep(now.Sub(s.lastPacket), jitter)
+	}
+	timestamp := s.timestamp
+	s.seq += rtpSequenceStep(sequenceSelector)
+	s.lastPacket = now
+	s.count++
+	return seq, timestamp
+}
+
+func useRTPPadding(selector byte) bool {
+	return selector&0x03 == 0
+}
+
+func useRTPMarker(selector byte) bool {
+	return selector&0x3F == 0
 }
 
 func obfsBuildNonceInto(dst *[12]byte, ssrc uint32, seq uint16, ts uint32) {
@@ -103,8 +149,8 @@ func obfsBuildNonce(ssrc uint32, seq uint16, ts uint32) []byte {
 
 func obfsWrapWireLen(payloadLen int, cfg *ObfsConfig) int {
 	pad := cfg.PaddingMax
-	if pad < 1 {
-		pad = 1
+	if pad < 0 {
+		pad = 0
 	}
 	return 12 + payloadLen + chacha20poly1305.Overhead + pad
 }
@@ -114,29 +160,31 @@ func obfsWrapPacketInto(dst []byte, aead cipher.AEAD, payload []byte, cfg *ObfsC
 		return 0, errors.New("obfs: empty payload")
 	}
 
-	state.mu.Lock()
-	c := state.count
-	state.count++
-	state.mu.Unlock()
-	seq := state.initSeq + uint16(c)
-	ts := state.initTs + uint32(c)*960 + uint32(c>>16)
-
-	padRand := 0
-	if cfg.PaddingMax > 0 {
-		var randomByte [1]byte
-		if _, err := rand.Read(randomByte[:]); err != nil {
-			return 0, fmt.Errorf("obfs: random padding length: %w", err)
-		}
-		padRand = int(randomByte[0]) % cfg.PaddingMax
+	var randomBytes [5]byte
+	if _, err := rand.Read(randomBytes[:]); err != nil {
+		return 0, fmt.Errorf("obfs: random RTP metadata: %w", err)
 	}
-	padTotal := padRand + 1
+	seq, ts := state.nextHeader(time.Now(), randomBytes[2], randomBytes[4])
+
+	padTotal := 0
+	padRand := 0
+	if cfg.PaddingMax > 0 && useRTPPadding(randomBytes[0]) {
+		padRand = int(randomBytes[1]) % cfg.PaddingMax
+		padTotal = padRand + 1
+	}
 	outLen := 12 + len(payload) + chacha20poly1305.Overhead + padTotal
 	if outLen > len(dst) {
 		return 0, fmt.Errorf("obfs: dst too small (%d > %d)", outLen, len(dst))
 	}
 
-	dst[0] = 0x80 | 0x20
+	dst[0] = 0x80
+	if padTotal > 0 {
+		dst[0] |= 0x20
+	}
 	dst[1] = cfg.PayloadType & 0x7F
+	if useRTPMarker(randomBytes[3]) {
+		dst[1] |= 0x80
+	}
 	binary.BigEndian.PutUint16(dst[2:4], seq)
 	binary.BigEndian.PutUint32(dst[4:8], ts)
 	binary.BigEndian.PutUint32(dst[8:12], cfg.SSRC)
@@ -151,7 +199,9 @@ func obfsWrapPacketInto(dst []byte, aead cipher.AEAD, payload []byte, cfg *ObfsC
 			return 0, fmt.Errorf("obfs: random padding bytes: %w", err)
 		}
 	}
-	dst[outLen-1] = byte(padTotal)
+	if padTotal > 0 {
+		dst[outLen-1] = byte(padTotal)
+	}
 	return outLen, nil
 }
 
@@ -375,6 +425,9 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 
 	if len(raw) > 1 {
 		c.obfsCfg.PayloadType = raw[1] & 0x7F
+		if c.obfsCfg.PayloadType == 96 {
+			c.obfsCfg.PaddingMax = 60
+		}
 	}
 	c.obfsWrite = NewObfsState()
 	atomic.StoreInt32(&c.selected, 1)
