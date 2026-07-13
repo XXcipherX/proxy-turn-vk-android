@@ -64,10 +64,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("[WG] Запуск: %v", err)
 	}
-	if removed := cleanupExpiredPasswords(wgDev); removed > 0 {
+	if removed, cleanupErr := cleanupExpiredPasswords(wgDev); cleanupErr != nil {
+		log.Printf("[DB] Очистка истёкших паролей при старте: %v", cleanupErr)
+	} else if removed > 0 {
 		log.Printf("[DB] Удалено истёкших паролей при старте: %d", removed)
 	}
-	syncPersistedPeersToWG(wgDev)
+	if err := syncPersistedPeersToWG(wgDev); err != nil {
+		log.Fatalf("[WG] Восстановление peer: %v", err)
+	}
 	defer func() {
 		wgDev.Close()
 		runCmdSilent("ip", "link", "del", wgIfaceName)

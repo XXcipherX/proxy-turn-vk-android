@@ -520,6 +520,7 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 
 				} else if strings.HasPrefix(data, "deact_") {
 					pass := strings.TrimPrefix(data, "deact_")
+					var peerErr error
 					dbMutex.Lock()
 					entry, exists := db.Passwords[pass]
 					if exists && entry != nil {
@@ -527,15 +528,18 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 
 						if entry.DeviceID != "" {
 							if dev, devExists := db.Devices[entry.DeviceID]; devExists {
-								if pubHex, err := b64ToHex(dev.PubKey); err == nil && pubHex != "" {
-									wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-								}
+								peerErr = removePeerFromWG(wgDev, dev)
 							}
 						}
 						saveDBLazy()
 					}
 					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("⏸ Пароль `%s` деактивирован", pass), nil)
+					if peerErr != nil {
+						log.Printf("[WG] Деактивация %s: %v", maskPassword(pass), peerErr)
+						sendTelegram(token, adminID, fmt.Sprintf("⚠️ Пароль `%s` деактивирован, но WireGuard peer удалить не удалось", pass), nil)
+					} else {
+						sendTelegram(token, adminID, fmt.Sprintf("⏸ Пароль `%s` деактивирован", pass), nil)
+					}
 
 				} else if strings.HasPrefix(data, "react_") {
 					pass := strings.TrimPrefix(data, "react_")
@@ -559,58 +563,82 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 
 				} else if strings.HasPrefix(data, "unbind_") {
 					pass := strings.TrimPrefix(data, "unbind_")
+					var peerErr error
 					dbMutex.Lock()
 					entry, exists := db.Passwords[pass]
 					if exists && entry != nil && entry.DeviceID != "" {
 
 						dev, devExists := db.Devices[entry.DeviceID]
 						if devExists {
-							pubHex, _ := b64ToHex(dev.PubKey)
-							wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-							delete(db.Devices, entry.DeviceID)
+							peerErr = removePeerFromWG(wgDev, dev)
+							if peerErr == nil {
+								delete(db.Devices, entry.DeviceID)
+							}
 						}
-						entry.DeviceID = ""
-						saveDBLazy()
+						if peerErr == nil {
+							entry.DeviceID = ""
+							saveDBLazy()
+						}
 					}
 					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("✅ Устройство отвязано от пароля `%s`", pass), nil)
+					if peerErr != nil {
+						log.Printf("[WG] Отвязка %s: %v", maskPassword(pass), peerErr)
+						sendTelegram(token, adminID, fmt.Sprintf("❌ Не удалось удалить WireGuard peer для пароля `%s`", pass), nil)
+					} else {
+						sendTelegram(token, adminID, fmt.Sprintf("✅ Устройство отвязано от пароля `%s`", pass), nil)
+					}
 
 				} else if strings.HasPrefix(data, "delpass_") {
 					pass := strings.TrimPrefix(data, "delpass_")
+					var peerErr error
 					dbMutex.Lock()
 					entry, exists := db.Passwords[pass]
 					if exists && entry != nil && entry.DeviceID != "" {
 						dev, devExists := db.Devices[entry.DeviceID]
 						if devExists {
-							pubHex, _ := b64ToHex(dev.PubKey)
-							wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-							delete(db.Devices, entry.DeviceID)
-						}
-					}
-					delete(db.Passwords, pass)
-					serverWrapKeys.RemovePassword(pass)
-					saveDBLazy()
-					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("✅ Пароль `%s` и его устройство удалены", pass), nil)
-
-				} else if strings.HasPrefix(data, "deldev_") {
-					devID := strings.TrimPrefix(data, "deldev_")
-					dbMutex.Lock()
-					dev, exists := db.Devices[devID]
-					if exists {
-						delete(db.Devices, devID)
-						pubHex, _ := b64ToHex(dev.PubKey)
-						wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-
-						for _, entry := range db.Passwords {
-							if entry != nil && entry.DeviceID == devID {
-								entry.DeviceID = ""
+							peerErr = removePeerFromWG(wgDev, dev)
+							if peerErr == nil {
+								delete(db.Devices, entry.DeviceID)
 							}
 						}
+					}
+					if peerErr == nil {
+						delete(db.Passwords, pass)
+						serverWrapKeys.RemovePassword(pass)
 						saveDBLazy()
 					}
 					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("✅ Устройство `%s` удалено", devID), nil)
+					if peerErr != nil {
+						log.Printf("[WG] Удаление пароля %s: %v", maskPassword(pass), peerErr)
+						sendTelegram(token, adminID, fmt.Sprintf("❌ Не удалось удалить WireGuard peer для пароля `%s`; пароль сохранён", pass), nil)
+					} else {
+						sendTelegram(token, adminID, fmt.Sprintf("✅ Пароль `%s` и его устройство удалены", pass), nil)
+					}
+
+				} else if strings.HasPrefix(data, "deldev_") {
+					devID := strings.TrimPrefix(data, "deldev_")
+					var peerErr error
+					dbMutex.Lock()
+					dev, exists := db.Devices[devID]
+					if exists {
+						peerErr = removePeerFromWG(wgDev, dev)
+						if peerErr == nil {
+							delete(db.Devices, devID)
+							for _, entry := range db.Passwords {
+								if entry != nil && entry.DeviceID == devID {
+									entry.DeviceID = ""
+								}
+							}
+							saveDBLazy()
+						}
+					}
+					dbMutex.Unlock()
+					if peerErr != nil {
+						log.Printf("[WG] Удаление устройства %s: %v", devID, peerErr)
+						sendTelegram(token, adminID, fmt.Sprintf("❌ Не удалось удалить WireGuard peer устройства `%s`", devID), nil)
+					} else {
+						sendTelegram(token, adminID, fmt.Sprintf("✅ Устройство `%s` удалено", devID), nil)
+					}
 
 				} else if data == "backlist" {
 					sendPasswordList(token, adminID, wgDev)
@@ -701,7 +729,11 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 				}
 
 				dbMutex.Lock()
-				if cleanupExpiredPasswordsLocked(wgDev) > 0 {
+				removed, cleanupErr := cleanupExpiredPasswordsLocked(wgDev)
+				if cleanupErr != nil {
+					log.Printf("[DB] Очистка истёкших паролей: %v", cleanupErr)
+				}
+				if removed > 0 {
 					saveDBLazy()
 				}
 				if len(db.Passwords) >= maxGeneratedPasswords {
@@ -750,7 +782,11 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 
 			} else if cmd == "/new" {
 				dbMutex.Lock()
-				if cleanupExpiredPasswordsLocked(wgDev) > 0 {
+				removed, cleanupErr := cleanupExpiredPasswordsLocked(wgDev)
+				if cleanupErr != nil {
+					log.Printf("[DB] Очистка истёкших паролей: %v", cleanupErr)
+				}
+				if removed > 0 {
 					saveDBLazy()
 				}
 				if len(db.Passwords) >= maxGeneratedPasswords {
@@ -769,52 +805,64 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 	}
 }
 
-func removePeerFromWG(wgDev *device.Device, dev *ClientDevice) {
+func removePeerFromWG(wgDev *device.Device, dev *ClientDevice) error {
 	if wgDev == nil || dev == nil || dev.PubKey == "" {
-		return
+		return errors.New("missing WireGuard device or peer key")
 	}
 	pubHex, err := b64ToHex(dev.PubKey)
 	if err != nil {
-		return
+		return fmt.Errorf("decode peer public key: %w", err)
 	}
-	wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
+	if err := wgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex)); err != nil {
+		return fmt.Errorf("remove peer %s: %w", dev.DeviceID, err)
+	}
+	return nil
 }
 
-func upsertPeerInWG(wgDev *device.Device, dev *ClientDevice) {
+func upsertPeerInWG(wgDev *device.Device, dev *ClientDevice) error {
 	if wgDev == nil || dev == nil || dev.PubKey == "" || dev.IP == "" {
-		return
+		return errors.New("missing WireGuard device, peer key, or peer IP")
 	}
 	pubHex, err := b64ToHex(dev.PubKey)
 	if err != nil {
-		return
+		return fmt.Errorf("decode peer public key: %w", err)
 	}
-	wgDev.IpcSet(fmt.Sprintf("public_key=%s\nallowed_ip=%s/32\n", pubHex, dev.IP))
+	if err := wgDev.IpcSet(fmt.Sprintf("public_key=%s\nallowed_ip=%s/32\n", pubHex, dev.IP)); err != nil {
+		return fmt.Errorf("upsert peer %s: %w", dev.DeviceID, err)
+	}
+	return nil
 }
 
-func cleanupExpiredPasswordsLocked(wgDev *device.Device) int {
+func cleanupExpiredPasswordsLocked(wgDev *device.Device) (int, error) {
 	removed := 0
+	var cleanupErrors []error
 	for p, entry := range db.Passwords {
 		if isPasswordExpired(entry) {
+			serverWrapKeys.RemovePassword(p)
 			if entry != nil && entry.DeviceID != "" {
-				removePeerFromWG(wgDev, db.Devices[entry.DeviceID])
+				if dev, exists := db.Devices[entry.DeviceID]; exists {
+					if err := removePeerFromWG(wgDev, dev); err != nil {
+						cleanupErrors = append(cleanupErrors, fmt.Errorf("expire password %s: %w", maskPassword(p), err))
+						continue
+					}
+				}
 				delete(db.Devices, entry.DeviceID)
 			}
 			delete(db.Passwords, p)
-			serverWrapKeys.RemovePassword(p)
 			removed++
 		}
 	}
-	return removed
+	return removed, errors.Join(cleanupErrors...)
 }
 
-func cleanupExpiredPasswords(wgDev *device.Device) int {
+func cleanupExpiredPasswords(wgDev *device.Device) (int, error) {
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
-	removed := cleanupExpiredPasswordsLocked(wgDev)
+	removed, err := cleanupExpiredPasswordsLocked(wgDev)
 	if removed > 0 {
 		saveDBLazy()
 	}
-	return removed
+	return removed, err
 }
 
 func expiredPasswordJanitor(ctx context.Context, wgDev *device.Device) {
@@ -825,31 +873,42 @@ func expiredPasswordJanitor(ctx context.Context, wgDev *device.Device) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if removed := cleanupExpiredPasswords(wgDev); removed > 0 {
+			removed, err := cleanupExpiredPasswords(wgDev)
+			if err != nil {
+				log.Printf("[DB] Очистка истёкших паролей: %v", err)
+			}
+			if removed > 0 {
 				log.Printf("[DB] Удалено истёкших паролей: %d", removed)
 			}
 		}
 	}
 }
 
-func syncPersistedPeersToWG(wgDev *device.Device) {
+func syncPersistedPeersToWG(wgDev *device.Device) error {
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
 	count := 0
-	for _, dev := range db.Devices {
-		upsertPeerInWG(wgDev, dev)
+	for deviceID, dev := range db.Devices {
+		if err := upsertPeerInWG(wgDev, dev); err != nil {
+			return fmt.Errorf("device %s: %w", deviceID, err)
+		}
 		count++
 	}
 	if count > 0 {
 		log.Printf("[WG] Восстановлено сохранённых устройств: %d", count)
 	}
+	return nil
 }
 
 func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
 
-	if cleanupExpiredPasswordsLocked(wgDev) > 0 {
+	removed, cleanupErr := cleanupExpiredPasswordsLocked(wgDev)
+	if cleanupErr != nil {
+		log.Printf("[DB] Очистка истёкших паролей: %v", cleanupErr)
+	}
+	if removed > 0 {
 		saveDBLazy()
 	}
 

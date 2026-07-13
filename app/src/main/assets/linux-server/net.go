@@ -310,13 +310,6 @@ func startUserspaceWG(keys *wgKeys, wgPort int) (*device.Device, error) {
 		return nil, fmt.Errorf("IpcSet: %w", err)
 	}
 
-	for _, d := range db.Devices {
-		pubHex, _ := b64ToHex(d.PubKey)
-		if pubHex != "" {
-			dev.IpcSet(fmt.Sprintf("public_key=%s\nallowed_ip=%s/32\n", pubHex, d.IP))
-		}
-	}
-
 	if err := dev.Up(); err != nil {
 		dev.Close()
 		return nil, fmt.Errorf("device.Up: %w", err)
@@ -485,13 +478,16 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 			dbMutex.Unlock()
 			return
 		} else if valid {
+			boundPassword := false
 			if isGenPass && entry.DeviceID == "" {
 				entry.DeviceID = deviceID
+				boundPassword = true
 				saveDBLazy()
 				log.Printf("[WG] Пароль %s привязан к устройству %s", maskPassword(password), deviceID)
 			}
 
 			dev, exists := db.Devices[deviceID]
+			createdDevice := false
 			if !exists {
 				dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP()}
 				privB64, pubB64, keyErr := generateKeyPair()
@@ -499,6 +495,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 					dev.PrivKey = privB64
 					dev.PubKey = pubB64
 					db.Devices[deviceID] = dev
+					createdDevice = true
 					saveDBLazy()
 					log.Printf("[WG] Новое устройство %s (IP: %s)", deviceID, dev.IP)
 				} else {
@@ -506,9 +503,25 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 				}
 			}
 			if dev != nil {
-				upsertPeerInWG(wgDev, dev)
+				if err := upsertPeerInWG(wgDev, dev); err != nil {
+					log.Printf("[WG] Не удалось настроить peer %s: %v", deviceID, err)
+					if createdDevice {
+						delete(db.Devices, deviceID)
+					}
+					if boundPassword {
+						entry.DeviceID = ""
+					}
+					saveDBLazy()
+					_, _ = clientConn.Write([]byte("NOCONF"))
+					dbMutex.Unlock()
+					return
+				}
 				clientConn.Write([]byte(buildClientConfig(keys.serverPublic, dev.PrivKey, dev.IP, clientPort)))
 			} else {
+				if boundPassword {
+					entry.DeviceID = ""
+					saveDBLazy()
+				}
 				clientConn.Write([]byte("NOCONF"))
 			}
 			dbMutex.Unlock()
