@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -145,16 +146,34 @@ func isNetTimeout(err error) bool {
 	return ok && ne.Timeout()
 }
 
-func getDefaultInterface() string {
-	out := runCmdSilent("bash", "-c", "ip route show default | awk '/default/ {print $5}' | head -1")
-	if out != "" {
-		return strings.TrimSpace(out)
+func defaultInterfaceFromRoutes(routes string) string {
+	for _, line := range strings.Split(routes, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "default" {
+			continue
+		}
+		for i := 1; i+1 < len(fields); i++ {
+			if fields[i] == "dev" {
+				return fields[i+1]
+			}
+		}
 	}
-	out = runCmdSilent("bash", "-c", "ip -o link show | awk -F': ' '{print $2}' | grep -v -E 'lo|wg|tun|wdtt' | head -1")
-	if out != "" {
-		return strings.TrimSpace(out)
+	return ""
+}
+
+func getDefaultInterface() (string, error) {
+	out, err := runCmd("ip", "route", "show", "default")
+	if err != nil {
+		return "", fmt.Errorf("read default route: %w: %s", err, out)
 	}
-	return "eth0"
+	iface := defaultInterfaceFromRoutes(out)
+	if iface == "" {
+		return "", errors.New("default route has no interface")
+	}
+	if linkOut, err := runCmd("ip", "link", "show", "dev", iface); err != nil {
+		return "", fmt.Errorf("validate external interface %s: %w: %s", iface, err, linkOut)
+	}
+	return iface, nil
 }
 
 type wgKeys struct {
@@ -229,27 +248,34 @@ generate:
 
 func setupFullConeNAT(wgIface string) error {
 	log.Println("[NAT] ══════════════════════════════════════")
+	if err := ensureIPv4Forwarding(); err != nil {
+		natType = "ОШИБКА: IPv4 forwarding"
+		return err
+	}
 
-	os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0644)
-
-	extIface := getDefaultInterface()
+	extIface, err := getDefaultInterface()
+	if err != nil {
+		natType = "ОШИБКА: внешний интерфейс"
+		return err
+	}
 	log.Printf("[NAT] Внешний: %s", extIface)
 
 	switch {
 	case commandExists("iptables"):
-		for i := 0; i < 5; i++ {
-			exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", wgServerCIDR, "-o", extIface, "-m", "comment", "--comment", "WDTT_MANAGED", "-j", "MASQUERADE").Run()
+		if err := setupIptablesNAT(wgIface, extIface); err != nil {
+			natType = "ОШИБКА: iptables"
+			return err
 		}
-		exec.Command("iptables", "-t", "nat", "-I", "POSTROUTING", "1", "-s", wgServerCIDR, "-o", extIface, "-m", "comment", "--comment", "WDTT_MANAGED", "-j", "MASQUERADE").Run()
 		natType = "MASQUERADE iptables ✅"
-		setupForwardRules(wgIface)
 	case commandExists("nft"):
-		setupNftNAT(extIface)
+		if err := setupNftNAT(wgIface, extIface); err != nil {
+			natType = "ОШИБКА: nftables"
+			return err
+		}
 		natType = "MASQUERADE nft ✅"
-		setupForwardRules(wgIface)
 	default:
 		natType = "NAT не настроен: нет iptables/nft"
-		log.Printf("[NAT] WARNING: %s", natType)
+		return errors.New(natType)
 	}
 
 	log.Printf("[NAT] Режим: %s", natType)
@@ -257,28 +283,103 @@ func setupFullConeNAT(wgIface string) error {
 	return nil
 }
 
-func setupNftNAT(extIface string) {
-	exec.Command("nft", "add", "table", "ip", "wdtt").Run()
-	exec.Command("nft", "add", "chain", "ip", "wdtt", "postrouting", "{ type nat hook postrouting priority 100; }").Run()
-	exec.Command("nft", "add", "rule", "ip", "wdtt", "postrouting", "ip", "saddr", wgServerCIDR, "oifname", extIface, "masquerade").Run()
+func ensureIPv4Forwarding() error {
+	const path = "/proc/sys/net/ipv4/ip_forward"
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	if strings.TrimSpace(string(current)) == "1" {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte("1\n"), 0644); err != nil {
+		return fmt.Errorf("enable IPv4 forwarding: %w", err)
+	}
+	current, err = os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("verify IPv4 forwarding: %w", err)
+	}
+	if strings.TrimSpace(string(current)) != "1" {
+		return errors.New("IPv4 forwarding remained disabled")
+	}
+	return nil
 }
 
-func setupForwardRules(wgIface string) {
-	if commandExists("iptables") {
-		for i := 0; i < 5; i++ {
-			exec.Command("iptables", "-D", "FORWARD", "-i", wgIface, "-m", "comment", "--comment", "WDTT_MANAGED", "-j", "ACCEPT").Run()
-			exec.Command("iptables", "-D", "FORWARD", "-o", wgIface, "-m", "comment", "--comment", "WDTT_MANAGED", "-j", "ACCEPT").Run()
+func ensureIptablesRule(table, chain string, insert bool, rule ...string) error {
+	base := []string{"-w", "5"}
+	if table != "filter" {
+		base = append(base, "-t", table)
+	}
+	checkArgs := append(append([]string{}, base...), "-C", chain)
+	checkArgs = append(checkArgs, rule...)
+	if _, err := runCmd("iptables", checkArgs...); err == nil {
+		return nil
+	}
+	action := "-A"
+	if insert {
+		action = "-I"
+	}
+	addArgs := append(append([]string{}, base...), action, chain)
+	if insert {
+		addArgs = append(addArgs, "1")
+	}
+	addArgs = append(addArgs, rule...)
+	out, err := runCmd("iptables", addArgs...)
+	if err != nil {
+		return fmt.Errorf("iptables %s/%s: %w: %s", table, chain, err, out)
+	}
+	return nil
+}
+
+func setupIptablesNAT(wgIface, extIface string) error {
+	comment := []string{"-m", "comment", "--comment", "WDTT_MANAGED"}
+	natRule := []string{"-s", wgServerCIDR, "-o", extIface}
+	natRule = append(natRule, comment...)
+	natRule = append(natRule, "-j", "MASQUERADE")
+	if err := ensureIptablesRule("nat", "POSTROUTING", true, natRule...); err != nil {
+		return err
+	}
+
+	fromRule := []string{"-i", wgIface}
+	fromRule = append(fromRule, comment...)
+	fromRule = append(fromRule, "-j", "ACCEPT")
+	if err := ensureIptablesRule("filter", "FORWARD", false, fromRule...); err != nil {
+		return err
+	}
+	toRule := []string{"-o", wgIface}
+	toRule = append(toRule, comment...)
+	toRule = append(toRule, "-j", "ACCEPT")
+	return ensureIptablesRule("filter", "FORWARD", false, toRule...)
+}
+
+func runNft(args ...string) error {
+	out, err := runCmd("nft", args...)
+	if err != nil {
+		return fmt.Errorf("nft %s: %w: %s", strings.Join(args, " "), err, out)
+	}
+	return nil
+}
+
+func setupNftNAT(wgIface, extIface string) error {
+	if _, err := runCmd("nft", "list", "table", "inet", "wdtt"); err == nil {
+		if err := runNft("delete", "table", "inet", "wdtt"); err != nil {
+			return err
 		}
-		exec.Command("iptables", "-A", "FORWARD", "-i", wgIface, "-m", "comment", "--comment", "WDTT_MANAGED", "-j", "ACCEPT").Run()
-		exec.Command("iptables", "-A", "FORWARD", "-o", wgIface, "-m", "comment", "--comment", "WDTT_MANAGED", "-j", "ACCEPT").Run()
-		return
 	}
-	if commandExists("nft") {
-		exec.Command("nft", "add", "table", "inet", "wdtt").Run()
-		exec.Command("nft", "add", "chain", "inet", "wdtt", "forward", "{ type filter hook forward priority 0; policy accept; }").Run()
-		exec.Command("nft", "add", "rule", "inet", "wdtt", "forward", "iifname", wgIface, "accept").Run()
-		exec.Command("nft", "add", "rule", "inet", "wdtt", "forward", "oifname", wgIface, "accept").Run()
+	commands := [][]string{
+		{"add", "table", "inet", "wdtt"},
+		{"add", "chain", "inet", "wdtt", "postrouting", "{ type nat hook postrouting priority srcnat; policy accept; }"},
+		{"add", "rule", "inet", "wdtt", "postrouting", "ip", "saddr", wgServerCIDR, "oifname", extIface, "masquerade"},
+		{"add", "chain", "inet", "wdtt", "forward", "{ type filter hook forward priority filter; policy accept; }"},
+		{"add", "rule", "inet", "wdtt", "forward", "iifname", wgIface, "accept"},
+		{"add", "rule", "inet", "wdtt", "forward", "oifname", wgIface, "accept"},
 	}
+	for _, command := range commands {
+		if err := runNft(command...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func startUserspaceWG(keys *wgKeys, wgPort int) (*device.Device, error) {
