@@ -1,0 +1,87 @@
+# To get started with Dependabot version updates, you'll need to specify which
+# package ecosystems to update and where the package manifests are located.
+# Please see the documentation for all configuration options:
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+
+updates:
+  # Android, Kotlin, Compose и Gradle plugins
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "04:00"
+      timezone: "Europe/Moscow"
+    open-pull-requests-limit: 20
+    groups:
+      gradle-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Go-зависимости Android-клиента
+  - package-ecosystem: "gomod"
+    directory: "/app/src/main/assets/android-client"
+    schedule:
+      interval: "daily"
+      time: "04:10"
+      timezone: "Europe/Moscow"
+    open-pull-requests-limit: 20
+    groups:
+      android-go-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Go-зависимости сервера
+  - package-ecosystem: "gomod"
+    directory: "/app/src/main/assets/linux-server"
+    schedule:
+      interval: "daily"
+      time: "04:20"
+      timezone: "Europe/Moscow"
+    open-pull-requests-limit: 20
+    groups:
+      server-go-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Базовые Docker-образы
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "04:30"
+      timezone: "Europe/Moscow"
+    open-pull-requests-limit: 20
+    groups:
+      docker-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # actions/checkout, setup-go, upload-artifact и остальные Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "04:40"
+      timezone: "Europe/Moscow"
+    open-pull-requests-limit: 20
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
