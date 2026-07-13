@@ -220,11 +220,15 @@ WDTT-сервер поддерживает две модели подключе�
 >
 > Если возникла проблема, приложите к `issue` отчёт из раздела **«Информация»**, скриншот вкладки **«Логи»**, версию APK, ABI сборки и описание сети. Мелкие повторяющиеся ошибки в логах не всегда означают поломку, если туннель остаётся активным.
 
-## Проверки серверной части
+## Автоматические проверки
 
-Workflow `Server CI` автоматически запускается при push и для pull request, если изменены серверный Go-модуль, Dockerfile, серверный build-скрипт или сами CI-тесты. Он выполняет unit/contract-тесты, `go vet`, race detector, короткий fuzzing RTP AEAD и GETCONF, сборку Linux `amd64`/`arm64`, `govulncheck`, а затем поднимает привилегированный Docker-контейнер в изолированной сети.
+- `Server CI` выполняет unit/contract-тесты, `go vet`, race detector, короткий fuzzing RTP AEAD и GETCONF, сборку Linux `amd64`/`arm64`, `govulncheck` и реальный Docker smoke. Контейнерный тест проверяет WRAP → DTLS → GETCONF, отказ при несовпадении паролей, loopback-привязку WireGuard, NAT/firewall, права файлов, корректный SIGTERM, сохранение ключей и восстановление устройства после рестарта. Он не обращается к VK или настоящему Telegram API.
+- `Android CI` проверяет Go-модуль клиента, собирает нативный клиент для `arm64-v8a`, `armeabi-v7a` и `x86_64`, запускает Gradle unit/lint-задачи и собирает release APK без публикации.
+- `Docker CI` собирает образ для `linux/amd64` и `linux/arm64`, но не публикует его.
+- `Workflow lint` проверяет синтаксис и выражения GitHub Actions, а `Dependency Review` блокирует pull request с новой зависимостью высокой или критической опасности.
+- `Gradle Dependency Submission` после изменений default-ветки отправляет полный Gradle-граф в GitHub Dependency Graph, чтобы Dependabot alerts видел Android-зависимости.
 
-Docker smoke проверяет реальный путь WRAP → DTLS → GETCONF, отказ при несовпадении паролей, loopback-привязку внутреннего WireGuard, NAT/firewall, права файлов, корректный SIGTERM, сохранение ключей и восстановление устройства после рестарта. Проверка не обращается к VK или настоящему Telegram API.
+Обычные Dependabot version updates включены для серверного Go-модуля, Docker и GitHub Actions. Android/Gradle и Go-клиент обновляются вручную после проверки совместимости, при этом Dependabot alerts, security updates, Dependency Review и Android CI продолжают защищать их от известных уязвимостей.
 
 ## Сборка
 

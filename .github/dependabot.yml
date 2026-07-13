@@ -6,44 +6,12 @@
 version: 2
 
 updates:
-  # Android, Kotlin, Compose и Gradle plugins
-  - package-ecosystem: "gradle"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "04:00"
-      timezone: "Europe/Moscow"
-    open-pull-requests-limit: 20
-    groups:
-      gradle-minor-patch:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
-
-  # Go-зависимости Android-клиента
-  - package-ecosystem: "gomod"
-    directory: "/app/src/main/assets/android-client"
-    schedule:
-      interval: "daily"
-      time: "04:10"
-      timezone: "Europe/Moscow"
-    open-pull-requests-limit: 20
-    groups:
-      android-go-minor-patch:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
-
   # Go-зависимости сервера
   - package-ecosystem: "gomod"
     directory: "/app/src/main/assets/linux-server"
     schedule:
       interval: "daily"
-      time: "04:20"
+      time: "04:00"
       timezone: "Europe/Moscow"
     open-pull-requests-limit: 20
     groups:
@@ -59,7 +27,7 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
-      time: "04:30"
+      time: "04:10"
       timezone: "Europe/Moscow"
     open-pull-requests-limit: 20
     groups:
@@ -75,7 +43,7 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
-      time: "04:40"
+      time: "04:20"
       timezone: "Europe/Moscow"
     open-pull-requests-limit: 20
     groups:
