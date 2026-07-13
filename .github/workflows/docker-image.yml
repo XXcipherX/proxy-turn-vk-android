@@ -49,10 +49,12 @@ jobs:
       - name: Prepare image tags
         id: tags
         shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
 
-          tag="${{ inputs.tag }}"
+          tag="$IMAGE_TAG"
           if ! [[ "$tag" =~ ^[A-Za-z0-9_.-]+$ ]]; then
             echo "Invalid tag: $tag"
             echo "Use only letters, digits, dot, underscore and dash."
