@@ -25,20 +25,76 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 )
 
-func generatePassword() string {
-	b := make([]byte, generatedPasswordLen)
-	randomBytes := make([]byte, len(b))
-	if _, err := rand.Read(randomBytes); err != nil {
-		now := time.Now().UnixNano()
-		for i := range b {
-			b[i] = passChars[int(now+int64(i))%len(passChars)]
+func generatePasswordFrom(reader io.Reader) (string, error) {
+	password := make([]byte, generatedPasswordLen)
+	randomBytes := make([]byte, 32)
+	// Discard the tail of the byte range so every character has exactly the
+	// same probability. This also lets us fail closed if the OS CSPRNG fails.
+	cutoff := 256 - 256%len(passChars)
+	for written := 0; written < len(password); {
+		if _, err := io.ReadFull(reader, randomBytes); err != nil {
+			return "", fmt.Errorf("generate password: %w", err)
 		}
-		return string(b)
+		for _, raw := range randomBytes {
+			if int(raw) >= cutoff {
+				continue
+			}
+			password[written] = passChars[int(raw)%len(passChars)]
+			written++
+			if written == len(password) {
+				break
+			}
+		}
 	}
-	for i, raw := range randomBytes {
-		b[i] = passChars[int(raw)%len(passChars)]
+	return string(password), nil
+}
+
+func generatePassword() (string, error) {
+	return generatePasswordFrom(rand.Reader)
+}
+
+func validateMainPassword(password string) error {
+	if len(password) < 16 {
+		return errors.New("main password must contain at least 16 characters")
 	}
-	return string(b)
+	if len(password) > 128 {
+		return errors.New("main password must contain at most 128 characters")
+	}
+
+	distinct := make(map[byte]struct{}, len(password))
+	classes := 0
+	hasLower, hasUpper, hasDigit, hasSymbol := false, false, false, false
+	for i := 0; i < len(password); i++ {
+		ch := password[i]
+		distinct[ch] = struct{}{}
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			hasLower = true
+		case ch >= 'A' && ch <= 'Z':
+			hasUpper = true
+		case ch >= '0' && ch <= '9':
+			hasDigit = true
+		case ch == '.' || ch == '_' || ch == '-':
+			hasSymbol = true
+		default:
+			return errors.New("main password may contain only A-Z, a-z, 0-9, dot, underscore and dash")
+		}
+	}
+	for _, present := range []bool{hasLower, hasUpper, hasDigit, hasSymbol} {
+		if present {
+			classes++
+		}
+	}
+	if classes < 2 || len(distinct) < 8 {
+		return errors.New("main password is too predictable; use a randomly generated password")
+	}
+	lower := strings.ToLower(password)
+	for _, weak := range []string{"password", "changeme", "qwerty", "letmein", "123456", "adminadmin"} {
+		if strings.Contains(lower, weak) {
+			return errors.New("main password contains a common weak pattern; use a randomly generated password")
+		}
+	}
+	return nil
 }
 
 var publicIP string = ""
@@ -259,6 +315,9 @@ func refreshWrapKeysFromDBLocked() error {
 }
 
 func initDB(dir, mainPass, adminID, botToken string) error {
+	if err := validateMainPassword(mainPass); err != nil {
+		return fmt.Errorf("invalid main password: %w", err)
+	}
 	dbFile = filepath.Join(dir, "passwords.json")
 	loaded := &Database{
 		Passwords: make(map[string]*PasswordEntry),
@@ -809,8 +868,13 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 					continue
 				}
 				newPass := ""
+				var generateErr error
 				for i := 0; i < 10; i++ {
-					candidate := generatePassword()
+					candidate, err := generatePassword()
+					if err != nil {
+						generateErr = err
+						break
+					}
 					if _, exists := db.Passwords[candidate]; !exists {
 						newPass = candidate
 						break
@@ -818,6 +882,11 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 				}
 				if newPass == "" {
 					dbMutex.Unlock()
+					if generateErr != nil {
+						log.Printf("[DB] Генерация пароля: %v", generateErr)
+						sendTelegram(token, adminID, "❌ Системный генератор случайных чисел недоступен. Пароль не создан.", nil)
+						continue
+					}
 					sendTelegram(token, adminID, "❌ Не удалось создать уникальный пароль. Повторите /new.", nil)
 					continue
 				}
