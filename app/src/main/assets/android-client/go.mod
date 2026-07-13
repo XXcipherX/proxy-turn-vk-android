@@ -10,7 +10,7 @@ require (
 	github.com/pion/dtls/v3 v3.1.2
 	github.com/pion/logging v0.2.4
 	github.com/pion/turn/v5 v5.0.2
-	golang.org/x/crypto v0.51.0
+	golang.org/x/crypto v0.52.0
 )
 
 require (
