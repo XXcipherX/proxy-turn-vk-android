@@ -20,7 +20,6 @@ import (
 	"github.com/pion/dtls/v3"
 	"golang.org/x/crypto/curve25519"
 
-	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/ipc"
 	"golang.zx2c4.com/wireguard/tun"
@@ -298,7 +297,7 @@ func startUserspaceWG(keys *wgKeys, wgPort int) (*device.Device, error) {
 	}
 
 	logger := device.NewLogger(device.LogLevelError, "[WG] ")
-	bind := conn.NewDefaultBind()
+	bind := newLoopbackBind()
 	dev := device.NewDevice(tunDev, bind, logger)
 
 	serverPrivHex, _ := b64ToHex(keys.serverPrivate)
