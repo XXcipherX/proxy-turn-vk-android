@@ -374,10 +374,15 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 	}
 
 	go func() {
-		cmds := `{"commands":[{"command":"start","description":"Главное меню"},{"command":"new","description":"Создать временный пароль"},{"command":"list","description":"Управление доступами"}]}`
-		resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/setMyCommands", token), "application/json", strings.NewReader(cmds))
-		if err == nil {
-			resp.Body.Close()
+		payload := map[string]interface{}{
+			"commands": []map[string]string{
+				{"command": "start", "description": "Главное меню"},
+				{"command": "new", "description": "Создать временный пароль"},
+				{"command": "list", "description": "Управление доступами"},
+			},
+		}
+		if err := postTelegram(token, "setMyCommands", payload); err != nil {
+			log.Printf("[TG] setMyCommands: %v", err)
 		}
 	}()
 
@@ -435,7 +440,11 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 
 			if u.CallbackQuery != nil && u.CallbackQuery.Message.Chat.ID == adminID {
 				data := u.CallbackQuery.Data
-				answerCallback(token, u.CallbackQuery.ID)
+				if err := postTelegram(token, "answerCallbackQuery", map[string]interface{}{
+					"callback_query_id": u.CallbackQuery.ID,
+				}); err != nil {
+					log.Printf("[TG] answerCallbackQuery: %v", err)
+				}
 
 				if strings.HasPrefix(data, "viewpass_") {
 
@@ -492,8 +501,9 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 							"callback_data": "unbind_" + pass,
 						})
 					}
+					isDeactivated := entry.IsDeactivated
 					dbMutex.Unlock()
-					if entry.IsDeactivated {
+					if isDeactivated {
 						kb = append(kb, map[string]interface{}{
 							"text":          "✅ Активировать",
 							"callback_data": "react_" + pass,
@@ -902,7 +912,6 @@ func syncPersistedPeersToWG(wgDev *device.Device) error {
 
 func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
 	dbMutex.Lock()
-	defer dbMutex.Unlock()
 
 	removed, cleanupErr := cleanupExpiredPasswordsLocked(wgDev)
 	if cleanupErr != nil {
@@ -957,14 +966,8 @@ func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
 		}
 		replyMarkup = map[string]interface{}{"inline_keyboard": keyboard}
 	}
+	dbMutex.Unlock()
 	sendTelegram(token, adminID, txt, replyMarkup)
-}
-
-func answerCallback(token, callbackID string) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery", token)
-	payload := map[string]interface{}{"callback_query_id": callbackID}
-	body, _ := json.Marshal(payload)
-	http.Post(url, "application/json", bytes.NewBuffer(body))
 }
 
 func maskPassword(pass string) string {
@@ -974,8 +977,47 @@ func maskPassword(pass string) string {
 	return pass[:3] + "****"
 }
 
+var telegramHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+func postTelegram(token, method string, payload interface{}) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode request: %w", err)
+	}
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/%s", token, method)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := telegramHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %s", strings.ReplaceAll(err.Error(), token, "<redacted>"))
+	}
+	defer resp.Body.Close()
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if readErr != nil {
+		return fmt.Errorf("read response: %w", readErr)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		detail := strings.ReplaceAll(strings.TrimSpace(string(responseBody)), token, "<redacted>")
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, detail)
+	}
+	var telegramResult struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(responseBody, &telegramResult); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	if !telegramResult.OK {
+		return fmt.Errorf("API rejected request: %s", telegramResult.Description)
+	}
+	return nil
+}
+
 func sendTelegram(token string, chatID int64, text string, replyMarkup interface{}) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
 	payload := map[string]interface{}{
 		"chat_id":    chatID,
 		"text":       text,
@@ -984,6 +1026,7 @@ func sendTelegram(token string, chatID int64, text string, replyMarkup interface
 	if replyMarkup != nil {
 		payload["reply_markup"] = replyMarkup
 	}
-	body, _ := json.Marshal(payload)
-	http.Post(url, "application/json", bytes.NewBuffer(body))
+	if err := postTelegram(token, "sendMessage", payload); err != nil {
+		log.Printf("[TG] sendMessage: %v", err)
+	}
 }
