@@ -5,7 +5,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val defaultVersionCode = 124
+val defaultVersionCode = 200
+val defaultVersionName = "2.0.0"
 val releaseVersionCode = providers.gradleProperty("releaseVersionCode").orNull?.let { rawValue ->
     val parsedValue = rawValue.toLongOrNull()
         ?: throw GradleException("releaseVersionCode must be a decimal integer, got: $rawValue")
@@ -14,6 +15,15 @@ val releaseVersionCode = providers.gradleProperty("releaseVersionCode").orNull?.
     }
     parsedValue.toInt()
 } ?: defaultVersionCode
+val releaseVersionName = providers.gradleProperty("releaseVersionName").orNull?.let { rawValue ->
+    val normalizedValue = rawValue.trim()
+    if (!Regex("[0-9]+(?:\\.[0-9]+)*").matches(normalizedValue)) {
+        throw GradleException(
+            "releaseVersionName must contain dot-separated decimal components, got: $rawValue"
+        )
+    }
+    normalizedValue
+} ?: defaultVersionName
 
 val requireReleaseSigning = providers.gradleProperty("requireReleaseSigning")
     .orNull
@@ -61,7 +71,7 @@ android {
         minSdk = 28
         targetSdk = 35
         versionCode = releaseVersionCode
-        versionName = "1.2.4"
+        versionName = releaseVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -148,6 +158,8 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+
     implementation("androidx.core:core-ktx:1.15.0")
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.compose.ui:ui")

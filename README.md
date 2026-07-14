@@ -5,8 +5,8 @@
   <img src="https://img.shields.io/badge/Android-SDK_29--35-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android SDK">
   <img src="https://img.shields.io/badge/Go-1.25-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go Version">
   <img src="https://img.shields.io/badge/Kotlin-Compose-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white" alt="Kotlin">
-  <a href="https://github.com/amurcanov/proxy-turn-vk-android/stargazers">
-    <img src="https://img.shields.io/github/stars/amurcanov/proxy-turn-vk-android?style=for-the-badge&logo=github&color=ffca28&labelColor=24292e" alt="Stars">
+  <a href="https://github.com/XXcipherX/proxy-turn-vk-android/stargazers">
+    <img src="https://img.shields.io/github/stars/XXcipherX/proxy-turn-vk-android?style=for-the-badge&logo=github&color=ffca28&labelColor=24292e" alt="Stars">
   </a>
 </div>
 <br>
@@ -135,7 +135,7 @@ Android-приложение → VpnService / WireGuard GoBackend → локал
 
 1. Подготовьте VPS с публичным IPv4 и установите сервер через [`XXcipherX/vkturn-vps-setup`](https://github.com/XXcipherX/vkturn-vps-setup). Установщик поддерживает обычный systemd-режим и Docker Compose.
 2. Сохраните IP/домен VPS, настроенные порты и главный пароль, выведенные установщиком.
-3. Скачайте актуальный `APK` со **[страницы релизов](https://github.com/amurcanov/proxy-turn-vk-android/releases)** и установите его на Android-смартфон.
+3. Скачайте актуальный `APK` со **[страницы релизов](https://github.com/XXcipherX/proxy-turn-vk-android/releases)** и установите его на Android-смартфон.
 4. В VK создайте или откройте групповой звонок и скопируйте ссылку вида `vk.com/call/join/xxxxxxxxxxx`, где `xxxxxxxxxxx` — хеш звонка.
 5. Во вкладке **«Туннель»** укажите IP/домен сервера, VK-хеши, пароль подключения и количество потоков.
 6. Нажмите **«Подключить»**, предварительно выдав приложению необходимые разрешения.
@@ -208,7 +208,7 @@ WDTT-сервер поддерживает две модели подключе�
 
 #### Обновления
 
-Приложение проверяет **GitHub releases** репозитория [amurcanov/proxy-turn-vk-android](https://github.com/amurcanov/proxy-turn-vk-android), умеет показывать диалог новой версии и открывать страницу релиза в браузере. Проверка выполняется при запуске и периодически в фоне.
+Приложение проверяет **GitHub releases** репозитория [XXcipherX/proxy-turn-vk-android](https://github.com/XXcipherX/proxy-turn-vk-android), умеет показывать диалог новой версии и открывать страницу релиза в браузере. Проверка выполняется при запуске и периодически в фоне. APK, `versionName` и release tag используют одну версию вида `2.0.0.57` / `v2.0.0.57`, поэтому новые подписанные сборки корректно обнаруживаются и устанавливаются поверх предыдущих.
 
 #### Отчёт для issue
 
@@ -277,8 +277,14 @@ secret:
 
 После этого запускайте `Actions → Build WDTT Release → Run workflow`.
 Workflow не публикует APK при отсутствии секретов, проверяет подпись каждого
-файла и автоматически вычисляет возрастающий `versionCode` как исходный
-`versionCode × 100000 + GITHUB_RUN_NUMBER`.
+файла и автоматически формирует согласованные версии:
+
+- `versionName` — исходная версия с номером workflow, например `2.0.0.57`;
+- release tag — тот же номер с префиксом `v`, например `v2.0.0.57`;
+- `versionCode` — `исходный versionCode × 100000 + GITHUB_RUN_NUMBER`.
+
+Произвольный release tag не принимается: это не позволяет APK, тегу и updater
+оказаться на разных версиях.
 
 APK, созданный прежним workflow с одноразовым временным ключом, обновить поверх
 установленной версии невозможно. Один раз удалите такую версию и установите APK,

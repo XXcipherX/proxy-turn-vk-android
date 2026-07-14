@@ -84,6 +84,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.BuildConfig
+import com.wdtt.client.ProjectRepository
 import com.wdtt.client.R
 import com.wdtt.client.SettingsStore
 import com.wdtt.client.UPDATE_DIALOG_ACTION_POSTPONED
@@ -97,10 +98,10 @@ import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 
-private const val ReleasesUrl = "https://github.com/amurcanov/proxy-turn-vk-android/releases"
-private const val IssuesUrl = "https://github.com/amurcanov/proxy-turn-vk-android/issues/new"
-private const val DeveloperProfileUrl = "https://github.com/amurcanov"
-private const val RepositoryUrl = "https://github.com/amurcanov/proxy-turn-vk-android"
+private val ReleasesUrl = "${ProjectRepository.WEB_URL}/releases"
+private val IssuesUrl = "${ProjectRepository.WEB_URL}/issues/new"
+private val DeveloperProfileUrl = ProjectRepository.OWNER_PROFILE_URL
+private val RepositoryUrl = ProjectRepository.WEB_URL
 private const val DonateUrl = ""
 private val DonateActionButtonColor = Color(0xFF00AEA5)
 
@@ -361,7 +362,7 @@ fun InfoTab(
         ) {
             ProjectLinkRow(
                 title = "Автор Android-версии",
-                subtitle = "GitHub профиль amurcanov",
+                subtitle = "GitHub профиль ${ProjectRepository.OWNER}",
                 onClick = { openUrlInBrowser(context, DeveloperProfileUrl) },
                 icon = {
                     Icon(
