@@ -661,6 +661,101 @@ func getNextIP() string {
 	return ""
 }
 
+type telegramUpdate struct {
+	UpdateID int `json:"update_id"`
+	Message  *struct {
+		Chat struct {
+			ID int64 `json:"id"`
+		} `json:"chat"`
+		Text string `json:"text"`
+	} `json:"message"`
+	CallbackQuery *struct {
+		ID      string `json:"id"`
+		Data    string `json:"data"`
+		Message struct {
+			MessageID int `json:"message_id"`
+			Chat      struct {
+				ID int64 `json:"id"`
+			} `json:"chat"`
+		} `json:"message"`
+	} `json:"callback_query"`
+}
+
+type telegramUpdatesResponse struct {
+	OK          bool             `json:"ok"`
+	Description string           `json:"description"`
+	Result      []telegramUpdate `json:"result"`
+	Parameters  struct {
+		RetryAfter int `json:"retry_after"`
+	} `json:"parameters"`
+}
+
+func telegramPollingBackoff(failures int) time.Duration {
+	delay := telegramPollingMinBackoff
+	for attempt := 1; attempt < failures && delay < telegramPollingMaxBackoff; attempt++ {
+		if delay > telegramPollingMaxBackoff/2 {
+			return telegramPollingMaxBackoff
+		}
+		delay *= 2
+	}
+	if delay > telegramPollingMaxBackoff {
+		return telegramPollingMaxBackoff
+	}
+	return delay
+}
+
+func waitForTelegramRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func getTelegramUpdates(ctx context.Context, client *http.Client, token string, offset int) ([]telegramUpdate, time.Duration, error) {
+	url := fmt.Sprintf("%s/bot%s/getUpdates?timeout=60&offset=%d", strings.TrimRight(telegramAPIBaseURL, "/"), token, offset)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("create request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("request failed: %s", strings.ReplaceAll(err.Error(), token, "<redacted>"))
+	}
+	defer resp.Body.Close()
+
+	const maxResponseSize = 2 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
+	if err != nil {
+		return nil, 0, fmt.Errorf("read response: %w", err)
+	}
+	if len(body) > maxResponseSize {
+		return nil, 0, errors.New("response exceeds 2 MiB")
+	}
+
+	var result telegramUpdatesResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, 0, fmt.Errorf("decode response: %w", err)
+	}
+	retryAfter := time.Duration(result.Parameters.RetryAfter) * time.Second
+	if retryAfter == 0 {
+		if seconds, parseErr := strconv.Atoi(resp.Header.Get("Retry-After")); parseErr == nil && seconds > 0 {
+			retryAfter = time.Duration(seconds) * time.Second
+		}
+	}
+	description := strings.ReplaceAll(strings.TrimSpace(result.Description), token, "<redacted>")
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, retryAfter, fmt.Errorf("HTTP %d: %s", resp.StatusCode, description)
+	}
+	if !result.OK {
+		return nil, retryAfter, fmt.Errorf("API rejected getUpdates: %s", description)
+	}
+	return result.Result, 0, nil
+}
+
 func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device.Device) {
 	if token == "" || adminIDstr == "" {
 		return
@@ -682,7 +777,7 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 	}
 
 	offset := 0
-	client := &http.Client{Timeout: 65 * time.Second}
+	pollFailures := 0
 
 	var waitingForDays bool
 	var waitingForPorts bool
@@ -698,60 +793,28 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 			return
 		default:
 		}
-		url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?timeout=60&offset=%d", token, offset)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			log.Printf("[TG] getUpdates request: %v", err)
-			return
-		}
-		resp, err := client.Do(req)
+		updates, retryAfter, err := getTelegramUpdates(ctx, telegramPollingHTTPClient, token, offset)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			select {
-			case <-ctx.Done():
+			pollFailures++
+			delay := telegramPollingBackoff(pollFailures)
+			if retryAfter > delay {
+				delay = retryAfter
+			}
+			if delay > telegramPollingMaxBackoff {
+				delay = telegramPollingMaxBackoff
+			}
+			log.Printf("[TG] getUpdates failed, retry in %s: %v", delay, err)
+			if !waitForTelegramRetry(ctx, delay) {
 				return
-			case <-time.After(2 * time.Second):
 			}
 			continue
 		}
+		pollFailures = 0
 
-		var res struct {
-			Ok     bool `json:"ok"`
-			Result []struct {
-				UpdateID int `json:"update_id"`
-				Message  *struct {
-					Chat struct {
-						ID int64 `json:"id"`
-					} `json:"chat"`
-					Text string `json:"text"`
-				} `json:"message"`
-				CallbackQuery *struct {
-					ID      string `json:"id"`
-					Data    string `json:"data"`
-					Message struct {
-						MessageID int `json:"message_id"`
-						Chat      struct {
-							ID int64 `json:"id"`
-						} `json:"chat"`
-					} `json:"message"`
-				} `json:"callback_query"`
-			} `json:"result"`
-		}
-
-		err = json.NewDecoder(resp.Body).Decode(&res)
-		resp.Body.Close()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
-			}
-			continue
-		}
-
-		for _, u := range res.Result {
+		for _, u := range updates {
 			offset = u.UpdateID + 1
 
 			if u.CallbackQuery != nil && u.CallbackQuery.Message.Chat.ID == adminID {
@@ -1432,8 +1495,11 @@ func maskPassword(pass string) string {
 }
 
 var (
-	telegramHTTPClient = &http.Client{Timeout: 15 * time.Second}
-	telegramAPIBaseURL = "https://api.telegram.org"
+	telegramHTTPClient        = &http.Client{Timeout: 15 * time.Second}
+	telegramPollingHTTPClient = &http.Client{Timeout: 65 * time.Second}
+	telegramAPIBaseURL        = "https://api.telegram.org"
+	telegramPollingMinBackoff = 2 * time.Second
+	telegramPollingMaxBackoff = time.Minute
 )
 
 func postTelegram(token, method string, payload interface{}) error {
