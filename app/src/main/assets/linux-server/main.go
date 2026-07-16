@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,75 @@ import (
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 )
+
+func resolveServerListenAddress(value string) (*net.UDPAddr, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, fmt.Errorf("listen address is empty")
+	}
+	host, _, err := net.SplitHostPort(value)
+	if err != nil {
+		return nil, fmt.Errorf("parse listen address %q: %w", value, err)
+	}
+	if parsedHost := net.ParseIP(host); parsedHost != nil && parsedHost.To4() == nil {
+		return nil, fmt.Errorf("listen address must be IPv4")
+	}
+	addr, err := net.ResolveUDPAddr("udp4", value)
+	if err != nil {
+		return nil, fmt.Errorf("resolve listen address %q: %w", value, err)
+	}
+	if addr.Port < 1 || addr.Port > 65535 {
+		return nil, fmt.Errorf("listen port must be between 1 and 65535")
+	}
+	if addr.IP != nil && addr.IP.To4() == nil {
+		return nil, fmt.Errorf("listen address must be IPv4")
+	}
+	return addr, nil
+}
+
+func validateDNSServers(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("DNS list is empty")
+	}
+	for _, rawServer := range strings.Split(value, ",") {
+		server := strings.TrimSpace(rawServer)
+		if server == "" || net.ParseIP(server) == nil {
+			return fmt.Errorf("invalid DNS server %q", rawServer)
+		}
+	}
+	return nil
+}
+
+func validateTelegramCredentials(adminID, botToken string) error {
+	adminID = strings.TrimSpace(adminID)
+	botToken = strings.TrimSpace(botToken)
+	if (adminID == "") != (botToken == "") {
+		return fmt.Errorf("admin and bot-token must be configured together")
+	}
+	if adminID == "" {
+		return nil
+	}
+	parsedAdminID, err := strconv.ParseInt(adminID, 10, 64)
+	if err != nil || parsedAdminID <= 0 {
+		return fmt.Errorf("admin must be a positive Telegram chat ID")
+	}
+	tokenParts := strings.SplitN(botToken, ":", 2)
+	if len(botToken) > 256 || len(tokenParts) != 2 || tokenParts[0] == "" || tokenParts[1] == "" {
+		return fmt.Errorf("bot-token has an invalid format")
+	}
+	if tokenID, err := strconv.ParseUint(tokenParts[0], 10, 64); err != nil || tokenID == 0 {
+		return fmt.Errorf("bot-token has an invalid bot ID")
+	}
+	for i := 0; i < len(botToken); i++ {
+		ch := botToken[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == ':' || ch == '-' {
+			continue
+		}
+		return fmt.Errorf("bot-token contains unsupported characters")
+	}
+	return nil
+}
 
 func main() {
 	listen := flag.String("listen", "0.0.0.0:56000", "DTLS адрес")
@@ -30,11 +100,40 @@ func main() {
 	maxConnections := flag.Int("max-connections", 512, "максимум одновременных DTLS-соединений")
 	handshakeRate := flag.Int("handshake-rate", 64, "максимум новых DTLS handshakes в секунду")
 	flag.Parse()
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+	if flag.NArg() != 0 {
+		log.Fatalf("[CONFIG] неожиданные аргументы: %s", strings.Join(flag.Args(), " "))
+	}
 	if *maxConnections < 1 || *maxConnections > 10000 {
 		log.Fatalf("[CONFIG] max-connections должен быть от 1 до 10000")
 	}
 	if *handshakeRate < 1 || *handshakeRate > 10000 {
 		log.Fatalf("[CONFIG] handshake-rate должен быть от 1 до 10000")
+	}
+	if *wgPort < 1 || *wgPort > 65535 {
+		log.Fatalf("[CONFIG] wg-port должен быть от 1 до 65535")
+	}
+	if strings.TrimSpace(*configDir) == "" {
+		log.Fatalf("[CONFIG] config-dir не может быть пустым")
+	}
+	addr, err := resolveServerListenAddress(*listen)
+	if err != nil {
+		log.Fatalf("[CONFIG] %v", err)
+	}
+	if addr.Port == *wgPort {
+		log.Fatalf("[CONFIG] listen и wg-port не могут использовать один UDP-порт")
+	}
+	if err := validateDNSServers(*dnsFlag); err != nil {
+		log.Fatalf("[CONFIG] %v", err)
+	}
+	if err := validateTelegramCredentials(*adminID, *botToken); err != nil {
+		log.Fatalf("[CONFIG] %v", err)
+	}
+	*adminID = strings.TrimSpace(*adminID)
+	*botToken = strings.TrimSpace(*botToken)
+	cert, err := selfsign.GenerateSelfSigned()
+	if err != nil {
+		log.Fatalf("[DTLS] создание сертификата: %v", err)
 	}
 	connectionLimit := newConnectionLimiter(*maxConnections, *handshakeRate)
 
@@ -42,7 +141,6 @@ func main() {
 		dns = v
 	}
 
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.Println("══════════════════════════════════════════")
 	log.Println("   WDTT Server v2 (Multi-User)")
 	log.Println("══════════════════════════════════════════")
@@ -101,8 +199,6 @@ func main() {
 		botLoop(ctx, *botToken, *adminID, wgDev)
 	}()
 
-	addr, _ := net.ResolveUDPAddr("udp", *listen)
-	cert, _ := selfsign.GenerateSelfSigned()
 	if serverWrapKeys.Count() == 0 {
 		log.Fatalf("[WRAP] нет активных паролей для WRAP")
 	}

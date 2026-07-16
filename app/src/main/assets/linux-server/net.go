@@ -546,7 +546,11 @@ func startUserspaceWG(keys *wgKeys, wgPort int) (*device.Device, error) {
 	bind := newLoopbackBind()
 	dev := device.NewDevice(tunDev, bind, logger)
 
-	serverPrivHex, _ := b64ToHex(keys.serverPrivate)
+	serverPrivHex, err := b64ToHex(keys.serverPrivate)
+	if err != nil {
+		dev.Close()
+		return nil, fmt.Errorf("decode server private key: %w", err)
+	}
 
 	if err := dev.IpcSet(fmt.Sprintf(
 		"private_key=%s\nlisten_port=%d\n",
