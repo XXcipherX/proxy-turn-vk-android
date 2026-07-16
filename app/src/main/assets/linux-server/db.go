@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -444,8 +445,13 @@ func initDB(dir, mainPass, adminID, botToken string) error {
 		if len(bytes.TrimSpace(data)) == 0 {
 			return fmt.Errorf("database %s is empty", dbFile)
 		}
-		if err := json.Unmarshal(data, loaded); err != nil {
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(loaded); err != nil {
 			return fmt.Errorf("decode database %s: %w", dbFile, err)
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			return fmt.Errorf("decode database %s: trailing JSON data", dbFile)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read database %s: %w", dbFile, err)
@@ -455,6 +461,9 @@ func initDB(dir, mainPass, adminID, botToken string) error {
 	}
 	if loaded.Devices == nil {
 		loaded.Devices = make(map[string]*ClientDevice)
+	}
+	if err := validatePersistentDatabase(loaded); err != nil {
+		return fmt.Errorf("validate database %s: %w", dbFile, err)
 	}
 	loaded.MainPassword = mainPass
 	loaded.AdminID = adminID
@@ -477,6 +486,142 @@ func initDB(dir, mainPass, adminID, botToken string) error {
 		return fmt.Errorf("initialize WRAP keys: %w", err)
 	}
 	rebuildPasswordAccessStatesLocked()
+	return nil
+}
+
+func validateDeviceID(deviceID string) error {
+	if len(deviceID) == 0 || len(deviceID) > 128 {
+		return errors.New("device ID must contain 1 to 128 characters")
+	}
+	for i := 0; i < len(deviceID); i++ {
+		ch := deviceID[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == ':' || ch == '-' {
+			continue
+		}
+		return fmt.Errorf("device ID contains unsupported byte 0x%02x", ch)
+	}
+	return nil
+}
+
+func validateStoredPassword(password string) error {
+	if len(password) == 0 || len(password) > 128 {
+		return errors.New("password key must contain 1 to 128 characters")
+	}
+	for i := 0; i < len(password); i++ {
+		ch := password[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-' {
+			continue
+		}
+		return fmt.Errorf("password key contains unsupported byte 0x%02x", ch)
+	}
+	return nil
+}
+
+func validateStoredPorts(ports string) error {
+	if ports == "" {
+		return nil
+	}
+	parts := strings.Split(ports, ",")
+	if len(parts) != 3 {
+		return errors.New("ports must contain exactly three comma-separated values")
+	}
+	for _, rawPort := range parts {
+		port, err := strconv.Atoi(strings.TrimSpace(rawPort))
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("invalid port %q", rawPort)
+		}
+	}
+	return nil
+}
+
+func validateStoredVKHash(hash string) error {
+	if len(hash) > 2048 {
+		return errors.New("VK hash is too long")
+	}
+	for i := 0; i < len(hash); i++ {
+		ch := hash[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == ',' || ch == '-' {
+			continue
+		}
+		return fmt.Errorf("VK hash contains unsupported byte 0x%02x", ch)
+	}
+	return nil
+}
+
+func validatePersistentDatabase(database *Database) error {
+	if database == nil {
+		return errors.New("database is nil")
+	}
+	if len(database.Passwords) > maxGeneratedPasswords {
+		return fmt.Errorf("password count %d exceeds limit %d", len(database.Passwords), maxGeneratedPasswords)
+	}
+	if len(database.Devices) > 249 {
+		return fmt.Errorf("device count %d exceeds address pool", len(database.Devices))
+	}
+
+	boundDevices := make(map[string]string, len(database.Passwords))
+	for password, entry := range database.Passwords {
+		if err := validateStoredPassword(password); err != nil {
+			return fmt.Errorf("password %q: %w", maskPassword(password), err)
+		}
+		if entry == nil {
+			return fmt.Errorf("password %s has a null entry", maskPassword(password))
+		}
+		if entry.ExpiresAt < 0 {
+			return fmt.Errorf("password %s has a negative expiry", maskPassword(password))
+		}
+		if err := validateStoredPorts(entry.Ports); err != nil {
+			return fmt.Errorf("password %s: %w", maskPassword(password), err)
+		}
+		if err := validateStoredVKHash(entry.VkHash); err != nil {
+			return fmt.Errorf("password %s: %w", maskPassword(password), err)
+		}
+		if entry.DeviceID == "" {
+			continue
+		}
+		if err := validateDeviceID(entry.DeviceID); err != nil {
+			return fmt.Errorf("password %s device: %w", maskPassword(password), err)
+		}
+		if previous, exists := boundDevices[entry.DeviceID]; exists {
+			return fmt.Errorf("device %q is bound to both %s and %s", entry.DeviceID, maskPassword(previous), maskPassword(password))
+		}
+		if database.Devices[entry.DeviceID] == nil {
+			return fmt.Errorf("password %s references missing device %q", maskPassword(password), entry.DeviceID)
+		}
+		boundDevices[entry.DeviceID] = password
+	}
+
+	usedIPs := make(map[string]string, len(database.Devices))
+	usedPublicKeys := make(map[string]string, len(database.Devices))
+	for deviceID, dev := range database.Devices {
+		if err := validateDeviceID(deviceID); err != nil {
+			return fmt.Errorf("device map key %q: %w", deviceID, err)
+		}
+		if dev == nil {
+			return fmt.Errorf("device %q has a null entry", deviceID)
+		}
+		if dev.DeviceID != deviceID {
+			return fmt.Errorf("device %q contains mismatched device_id %q", deviceID, dev.DeviceID)
+		}
+		ip := net.ParseIP(dev.IP).To4()
+		if ip == nil || ip[0] != 10 || ip[1] != 66 || ip[2] != 66 || ip[3] < 2 || ip[3] > 250 {
+			return fmt.Errorf("device %q has invalid tunnel IP %q", deviceID, dev.IP)
+		}
+		if previous, exists := usedIPs[dev.IP]; exists {
+			return fmt.Errorf("devices %q and %q share tunnel IP %s", previous, deviceID, dev.IP)
+		}
+		if previous, exists := usedPublicKeys[dev.PubKey]; exists {
+			return fmt.Errorf("devices %q and %q share a public key", previous, deviceID)
+		}
+		if err := validateKeyPair(dev.PrivKey, dev.PubKey); err != nil {
+			return fmt.Errorf("device %q key pair: %w", deviceID, err)
+		}
+		usedIPs[dev.IP] = deviceID
+		usedPublicKeys[dev.PubKey] = deviceID
+	}
 	return nil
 }
 

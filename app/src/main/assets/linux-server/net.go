@@ -648,8 +648,8 @@ func parseGetConfRequest(packet []byte) (getConfRequest, bool, error) {
 	if err != nil || port < 1 || port > 65535 {
 		return getConfRequest{}, true, errors.New("GETCONF contains an invalid client port")
 	}
-	if len(parts[1]) == 0 || len(parts[1]) > 128 {
-		return getConfRequest{}, true, errors.New("GETCONF contains an invalid device ID")
+	if err := validateDeviceID(parts[1]); err != nil {
+		return getConfRequest{}, true, fmt.Errorf("GETCONF contains an invalid device ID: %w", err)
 	}
 	if len(parts[2]) == 0 || len(parts[2]) > 128 {
 		return getConfRequest{}, true, errors.New("GETCONF contains an invalid password")
@@ -684,6 +684,14 @@ func provisionClientConfig(wgDev *device.Device, keys *wgKeys, request getConfRe
 	if isGeneratedPassword && entry.DeviceID != "" && entry.DeviceID != request.DeviceID {
 		dbMutex.Unlock()
 		return "", "DENIED:device_mismatch", nil
+	}
+	if isGeneratedPassword {
+		for otherPassword, otherEntry := range db.Passwords {
+			if otherPassword != connPassword && otherEntry != nil && otherEntry.DeviceID == request.DeviceID {
+				dbMutex.Unlock()
+				return "", "DENIED:device_mismatch", nil
+			}
+		}
 	}
 
 	boundPassword := false
