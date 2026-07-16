@@ -101,11 +101,21 @@ func validateMainPassword(password string) error {
 var publicIP string = ""
 
 var (
-	dbDirty       int32
-	dbSaveTimer   *time.Timer
-	dbSaveMu      sync.Mutex
-	dbWriteMu     sync.Mutex
-	peerMutationMu sync.Mutex
+	dbRevision       atomic.Uint64
+	dbSavedRevision  atomic.Uint64
+	dbSaveTimer      *time.Timer
+	dbSaveMu         sync.Mutex
+	dbSaveInProgress bool
+	dbSaveFailures   int
+	dbWriteMu        sync.Mutex
+	peerMutationMu   sync.Mutex
+	persistDatabase  = saveDBSync
+)
+
+var (
+	dbSaveDelay         = 5 * time.Second
+	dbSaveRetryMinDelay = 5 * time.Second
+	dbSaveRetryMaxDelay = time.Minute
 )
 
 func getPublicIP() string {
@@ -453,6 +463,16 @@ func initDB(dir, mainPass, adminID, botToken string) error {
 	if err := saveDBSync(); err != nil {
 		return fmt.Errorf("initial database save: %w", err)
 	}
+	dbSaveMu.Lock()
+	if dbSaveTimer != nil {
+		dbSaveTimer.Stop()
+		dbSaveTimer = nil
+	}
+	dbSaveInProgress = false
+	dbSaveFailures = 0
+	dbRevision.Store(0)
+	dbSavedRevision.Store(0)
+	dbSaveMu.Unlock()
 	if err := refreshWrapKeysFromDBLocked(); err != nil {
 		return fmt.Errorf("initialize WRAP keys: %w", err)
 	}
@@ -461,21 +481,75 @@ func initDB(dir, mainPass, adminID, botToken string) error {
 }
 
 func saveDBLazy() {
-	atomic.StoreInt32(&dbDirty, 1)
+	dbRevision.Add(1)
 
 	dbSaveMu.Lock()
-	if dbSaveTimer == nil {
-		dbSaveTimer = time.AfterFunc(5*time.Second, func() {
-			dbSaveMu.Lock()
-			dbSaveTimer = nil
-			dbSaveMu.Unlock()
+	if dbSaveTimer == nil && !dbSaveInProgress {
+		scheduleDBSaveLocked(dbSaveDelay)
+	}
+	dbSaveMu.Unlock()
+}
 
-			if atomic.SwapInt32(&dbDirty, 0) == 1 {
-				if err := saveDBSync(); err != nil {
-					log.Printf("[DB] delayed save: %v", err)
-				}
-			}
-		})
+func scheduleDBSaveLocked(delay time.Duration) {
+	dbSaveTimer = time.AfterFunc(delay, runDelayedDBSave)
+}
+
+func databaseSaveRetryDelay(failures int) time.Duration {
+	delay := dbSaveRetryMinDelay
+	for attempt := 1; attempt < failures && delay < dbSaveRetryMaxDelay; attempt++ {
+		if delay > dbSaveRetryMaxDelay/2 {
+			return dbSaveRetryMaxDelay
+		}
+		delay *= 2
+	}
+	if delay > dbSaveRetryMaxDelay {
+		return dbSaveRetryMaxDelay
+	}
+	return delay
+}
+
+func advanceSavedRevision(revision uint64) {
+	for {
+		current := dbSavedRevision.Load()
+		if current >= revision || dbSavedRevision.CompareAndSwap(current, revision) {
+			return
+		}
+	}
+}
+
+func runDelayedDBSave() {
+	dbSaveMu.Lock()
+	dbSaveTimer = nil
+	dbSaveInProgress = true
+	dbSaveMu.Unlock()
+
+	targetRevision := dbRevision.Load()
+	if targetRevision <= dbSavedRevision.Load() {
+		dbSaveMu.Lock()
+		dbSaveInProgress = false
+		dbSaveFailures = 0
+		dbSaveMu.Unlock()
+		return
+	}
+
+	err := persistDatabase()
+	dbSaveMu.Lock()
+	dbSaveInProgress = false
+	if err != nil {
+		dbSaveFailures++
+		retryDelay := databaseSaveRetryDelay(dbSaveFailures)
+		if dbSaveTimer == nil {
+			scheduleDBSaveLocked(retryDelay)
+		}
+		dbSaveMu.Unlock()
+		log.Printf("[DB] delayed save failed, retry in %s: %v", retryDelay, err)
+		return
+	}
+
+	advanceSavedRevision(targetRevision)
+	dbSaveFailures = 0
+	if dbRevision.Load() > dbSavedRevision.Load() && dbSaveTimer == nil {
+		scheduleDBSaveLocked(dbSaveDelay)
 	}
 	dbSaveMu.Unlock()
 }
@@ -488,8 +562,27 @@ func flushDB() error {
 	if timer != nil {
 		timer.Stop()
 	}
-	atomic.StoreInt32(&dbDirty, 0)
-	return saveDBSync()
+
+	for {
+		targetRevision := dbRevision.Load()
+		if err := persistDatabase(); err != nil {
+			return err
+		}
+		advanceSavedRevision(targetRevision)
+
+		dbSaveMu.Lock()
+		if dbRevision.Load() == targetRevision {
+			timer = dbSaveTimer
+			dbSaveTimer = nil
+			dbSaveFailures = 0
+			dbSaveMu.Unlock()
+			if timer != nil {
+				timer.Stop()
+			}
+			return nil
+		}
+		dbSaveMu.Unlock()
+	}
 }
 
 func saveDBSync() error {
