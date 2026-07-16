@@ -101,10 +101,11 @@ func validateMainPassword(password string) error {
 var publicIP string = ""
 
 var (
-	dbDirty     int32
-	dbSaveTimer *time.Timer
-	dbSaveMu    sync.Mutex
-	dbWriteMu   sync.Mutex
+	dbDirty       int32
+	dbSaveTimer   *time.Timer
+	dbSaveMu      sync.Mutex
+	dbWriteMu     sync.Mutex
+	peerMutationMu sync.Mutex
 )
 
 func getPublicIP() string {
@@ -145,6 +146,66 @@ type wrapKeyEntry struct {
 type wrapIdentity struct {
 	Password string
 	IsMain   bool
+}
+
+type passwordAccessState struct {
+	active    atomic.Bool
+	expiresAt atomic.Int64
+}
+
+func (s *passwordAccessState) IsActive() bool {
+	if s == nil || !s.active.Load() {
+		return false
+	}
+	expiresAt := s.expiresAt.Load()
+	return expiresAt == 0 || time.Now().Unix() <= expiresAt
+}
+
+var passwordAccessStates sync.Map
+
+func passwordAccessStateKey(password string, isMain bool) string {
+	if isMain {
+		return "main\x00" + password
+	}
+	return "generated\x00" + password
+}
+
+func setPasswordAccessState(password string, isMain bool, active bool, expiresAt int64) *passwordAccessState {
+	key := passwordAccessStateKey(password, isMain)
+	value, _ := passwordAccessStates.LoadOrStore(key, &passwordAccessState{})
+	state := value.(*passwordAccessState)
+	state.expiresAt.Store(expiresAt)
+	state.active.Store(active)
+	return state
+}
+
+func getPasswordAccessState(password string, isMain bool) *passwordAccessState {
+	value, ok := passwordAccessStates.Load(passwordAccessStateKey(password, isMain))
+	if !ok {
+		return nil
+	}
+	return value.(*passwordAccessState)
+}
+
+func disablePasswordAccessState(password string, isMain bool) {
+	if state := getPasswordAccessState(password, isMain); state != nil {
+		state.active.Store(false)
+	}
+}
+
+func rebuildPasswordAccessStatesLocked() {
+	passwordAccessStates.Range(func(key, value interface{}) bool {
+		value.(*passwordAccessState).active.Store(false)
+		passwordAccessStates.Delete(key)
+		return true
+	})
+	setPasswordAccessState(db.MainPassword, true, true, 0)
+	for password, entry := range db.Passwords {
+		if entry == nil {
+			continue
+		}
+		setPasswordAccessState(password, false, !entry.IsDeactivated && !isPasswordExpired(entry), entry.ExpiresAt)
+	}
 }
 
 type wrapKeyStore struct {
@@ -395,6 +456,7 @@ func initDB(dir, mainPass, adminID, botToken string) error {
 	if err := refreshWrapKeysFromDBLocked(); err != nil {
 		return fmt.Errorf("initialize WRAP keys: %w", err)
 	}
+	rebuildPasswordAccessStatesLocked()
 	return nil
 }
 
@@ -617,6 +679,14 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 						sendTelegram(token, adminID, "❌ Пароль не найден", nil)
 						continue
 					}
+					entrySnapshot := *entry
+					var deviceSnapshot *ClientDevice
+					if dev := db.Devices[entry.DeviceID]; dev != nil {
+						copy := *dev
+						deviceSnapshot = &copy
+					}
+					dbMutex.Unlock()
+					entry = &entrySnapshot
 					txt := fmt.Sprintf("🔑 *Пароль:* `%s`\n", pass)
 					if entry.VkHash != "" {
 						pts := strings.Split(entry.Ports, ",")
@@ -651,9 +721,8 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 					if entry.DeviceID == "" {
 						txt += "_Ожидает первого подключения..._\n"
 					} else {
-						dev, devExists := db.Devices[entry.DeviceID]
-						if devExists {
-							txt += fmt.Sprintf("• ID: `%s`\n• IP: `%s`\n", entry.DeviceID, dev.IP)
+						if deviceSnapshot != nil {
+							txt += fmt.Sprintf("• ID: `%s`\n• IP: `%s`\n", entry.DeviceID, deviceSnapshot.IP)
 						} else {
 							txt += fmt.Sprintf("• ID: `%s` (устройство удалено)\n", entry.DeviceID)
 						}
@@ -663,7 +732,6 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 						})
 					}
 					isDeactivated := entry.IsDeactivated
-					dbMutex.Unlock()
 					if isDeactivated {
 						kb = append(kb, map[string]interface{}{
 							"text":          "✅ Активировать",
@@ -691,20 +759,7 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 
 				} else if strings.HasPrefix(data, "deact_") {
 					pass := strings.TrimPrefix(data, "deact_")
-					var peerErr error
-					dbMutex.Lock()
-					entry, exists := db.Passwords[pass]
-					if exists && entry != nil {
-						entry.IsDeactivated = true
-
-						if entry.DeviceID != "" {
-							if dev, devExists := db.Devices[entry.DeviceID]; devExists {
-								peerErr = removePeerFromWG(wgDev, dev)
-							}
-						}
-						saveDBLazy()
-					}
-					dbMutex.Unlock()
+					_, peerErr := deactivateGeneratedPassword(wgDev, pass)
 					if peerErr != nil {
 						log.Printf("[WG] Деактивация %s: %v", maskPassword(pass), peerErr)
 						sendTelegram(token, adminID, fmt.Sprintf("⚠️ Пароль `%s` деактивирован, но WireGuard peer удалить не удалось", pass), nil)
@@ -714,13 +769,7 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 
 				} else if strings.HasPrefix(data, "react_") {
 					pass := strings.TrimPrefix(data, "react_")
-					dbMutex.Lock()
-					entry, exists := db.Passwords[pass]
-					if exists && entry != nil {
-						entry.IsDeactivated = false
-						saveDBLazy()
-					}
-					dbMutex.Unlock()
+					reactivateGeneratedPassword(pass)
 					sendTelegram(token, adminID, fmt.Sprintf("✅ Пароль `%s` активирован", pass), nil)
 
 				} else if data == "mainlink" {
@@ -734,24 +783,7 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 
 				} else if strings.HasPrefix(data, "unbind_") {
 					pass := strings.TrimPrefix(data, "unbind_")
-					var peerErr error
-					dbMutex.Lock()
-					entry, exists := db.Passwords[pass]
-					if exists && entry != nil && entry.DeviceID != "" {
-
-						dev, devExists := db.Devices[entry.DeviceID]
-						if devExists {
-							peerErr = removePeerFromWG(wgDev, dev)
-							if peerErr == nil {
-								delete(db.Devices, entry.DeviceID)
-							}
-						}
-						if peerErr == nil {
-							entry.DeviceID = ""
-							saveDBLazy()
-						}
-					}
-					dbMutex.Unlock()
+					_, peerErr := unbindGeneratedPassword(wgDev, pass)
 					if peerErr != nil {
 						log.Printf("[WG] Отвязка %s: %v", maskPassword(pass), peerErr)
 						sendTelegram(token, adminID, fmt.Sprintf("❌ Не удалось удалить WireGuard peer для пароля `%s`", pass), nil)
@@ -761,24 +793,7 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 
 				} else if strings.HasPrefix(data, "delpass_") {
 					pass := strings.TrimPrefix(data, "delpass_")
-					var peerErr error
-					dbMutex.Lock()
-					entry, exists := db.Passwords[pass]
-					if exists && entry != nil && entry.DeviceID != "" {
-						dev, devExists := db.Devices[entry.DeviceID]
-						if devExists {
-							peerErr = removePeerFromWG(wgDev, dev)
-							if peerErr == nil {
-								delete(db.Devices, entry.DeviceID)
-							}
-						}
-					}
-					if peerErr == nil {
-						delete(db.Passwords, pass)
-						serverWrapKeys.RemovePassword(pass)
-						saveDBLazy()
-					}
-					dbMutex.Unlock()
+					_, peerErr := deleteGeneratedPassword(wgDev, pass)
 					if peerErr != nil {
 						log.Printf("[WG] Удаление пароля %s: %v", maskPassword(pass), peerErr)
 						sendTelegram(token, adminID, fmt.Sprintf("❌ Не удалось удалить WireGuard peer для пароля `%s`; пароль сохранён", pass), nil)
@@ -788,17 +803,7 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 
 				} else if strings.HasPrefix(data, "deldev_") {
 					callbackToken := strings.TrimPrefix(data, "deldev_")
-					var peerErr error
-					dbMutex.Lock()
-					devID, dev, exists := findMainDeviceByCallbackToken(db, callbackToken)
-					if exists {
-						peerErr = removePeerFromWG(wgDev, dev)
-						if peerErr == nil {
-							delete(db.Devices, devID)
-							saveDBLazy()
-						}
-					}
-					dbMutex.Unlock()
+					devID, exists, peerErr := deleteMainDevice(wgDev, callbackToken)
 					if !exists {
 						sendTelegram(token, adminID, "❌ Устройство главного пароля не найдено или список уже устарел", nil)
 					} else if peerErr != nil {
@@ -896,14 +901,14 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 					continue
 				}
 
-				dbMutex.Lock()
-				removed, cleanupErr := cleanupExpiredPasswordsLocked(wgDev)
+				removed, cleanupErr := cleanupExpiredPasswords(wgDev)
 				if cleanupErr != nil {
 					log.Printf("[DB] Очистка истёкших паролей: %v", cleanupErr)
 				}
 				if removed > 0 {
-					saveDBLazy()
+					log.Printf("[DB] Удалено истёкших паролей: %d", removed)
 				}
+				dbMutex.Lock()
 				if len(db.Passwords) >= maxGeneratedPasswords {
 					dbMutex.Unlock()
 					sendTelegram(token, adminID, fmt.Sprintf("❌ Лимит паролей: максимум %d активных. Удалите ненужный пароль через /list.", maxGeneratedPasswords), nil)
@@ -943,6 +948,7 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 					VkHash:    hash,
 					Ports:     tempPorts,
 				}
+				setPasswordAccessState(newPass, false, true, expiresAt)
 				saveDBLazy()
 				dbMutex.Unlock()
 
@@ -959,14 +965,14 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 				sendTelegram(token, adminID, "🤖 *WDTT VPN Manager*\n\n/new — Создать пароль\n/list — Список паролей", nil)
 
 			} else if cmd == "/new" {
-				dbMutex.Lock()
-				removed, cleanupErr := cleanupExpiredPasswordsLocked(wgDev)
+				removed, cleanupErr := cleanupExpiredPasswords(wgDev)
 				if cleanupErr != nil {
 					log.Printf("[DB] Очистка истёкших паролей: %v", cleanupErr)
 				}
 				if removed > 0 {
-					saveDBLazy()
+					log.Printf("[DB] Удалено истёкших паролей: %d", removed)
 				}
+				dbMutex.Lock()
 				if len(db.Passwords) >= maxGeneratedPasswords {
 					dbMutex.Unlock()
 					sendTelegram(token, adminID, fmt.Sprintf("❌ Лимит паролей: максимум %d активных. Удалите ненужный пароль через /list.", maxGeneratedPasswords), nil)
@@ -1011,36 +1017,195 @@ func upsertPeerInWG(wgDev *device.Device, dev *ClientDevice) error {
 	return nil
 }
 
-func cleanupExpiredPasswordsLocked(wgDev *device.Device) (int, error) {
-	removed := 0
-	var cleanupErrors []error
-	for p, entry := range db.Passwords {
-		if isPasswordExpired(entry) {
-			serverWrapKeys.RemovePassword(p)
-			if entry != nil && entry.DeviceID != "" {
-				if dev, exists := db.Devices[entry.DeviceID]; exists {
-					if err := removePeerFromWG(wgDev, dev); err != nil {
-						cleanupErrors = append(cleanupErrors, fmt.Errorf("expire password %s: %w", maskPassword(p), err))
-						continue
-					}
-				}
-				delete(db.Devices, entry.DeviceID)
-			}
-			delete(db.Passwords, p)
-			removed++
+func deactivateGeneratedPassword(wgDev *device.Device, password string) (bool, error) {
+	peerMutationMu.Lock()
+	defer peerMutationMu.Unlock()
+
+	dbMutex.Lock()
+	entry, exists := db.Passwords[password]
+	if !exists || entry == nil {
+		dbMutex.Unlock()
+		return false, nil
+	}
+	entry.IsDeactivated = true
+	disablePasswordAccessState(password, false)
+	var deviceSnapshot *ClientDevice
+	if dev := db.Devices[entry.DeviceID]; dev != nil {
+		copy := *dev
+		deviceSnapshot = &copy
+	}
+	saveDBLazy()
+	dbMutex.Unlock()
+
+	if deviceSnapshot != nil {
+		return true, removePeerFromWG(wgDev, deviceSnapshot)
+	}
+	return true, nil
+}
+
+func reactivateGeneratedPassword(password string) bool {
+	peerMutationMu.Lock()
+	defer peerMutationMu.Unlock()
+	dbMutex.Lock()
+	defer dbMutex.Unlock()
+	entry, exists := db.Passwords[password]
+	if !exists || entry == nil || isPasswordExpired(entry) {
+		return false
+	}
+	entry.IsDeactivated = false
+	setPasswordAccessState(password, false, true, entry.ExpiresAt)
+	saveDBLazy()
+	return true
+}
+
+func unbindGeneratedPassword(wgDev *device.Device, password string) (bool, error) {
+	peerMutationMu.Lock()
+	defer peerMutationMu.Unlock()
+
+	dbMutex.RLock()
+	entry, exists := db.Passwords[password]
+	if !exists || entry == nil || entry.DeviceID == "" {
+		dbMutex.RUnlock()
+		return false, nil
+	}
+	deviceID := entry.DeviceID
+	var deviceSnapshot *ClientDevice
+	if dev := db.Devices[deviceID]; dev != nil {
+		copy := *dev
+		deviceSnapshot = &copy
+	}
+	dbMutex.RUnlock()
+
+	if deviceSnapshot != nil {
+		if err := removePeerFromWG(wgDev, deviceSnapshot); err != nil {
+			return true, err
 		}
 	}
-	return removed, errors.Join(cleanupErrors...)
+
+	dbMutex.Lock()
+	if current := db.Passwords[password]; current != nil && current.DeviceID == deviceID {
+		delete(db.Devices, deviceID)
+		current.DeviceID = ""
+		saveDBLazy()
+	}
+	dbMutex.Unlock()
+	return true, nil
+}
+
+func deleteGeneratedPassword(wgDev *device.Device, password string) (bool, error) {
+	peerMutationMu.Lock()
+	defer peerMutationMu.Unlock()
+
+	dbMutex.RLock()
+	entry, exists := db.Passwords[password]
+	if !exists || entry == nil {
+		dbMutex.RUnlock()
+		return false, nil
+	}
+	entrySnapshot := *entry
+	var deviceSnapshot *ClientDevice
+	if dev := db.Devices[entry.DeviceID]; dev != nil {
+		copy := *dev
+		deviceSnapshot = &copy
+	}
+	dbMutex.RUnlock()
+
+	disablePasswordAccessState(password, false)
+	if deviceSnapshot != nil {
+		if err := removePeerFromWG(wgDev, deviceSnapshot); err != nil {
+			setPasswordAccessState(password, false, !entrySnapshot.IsDeactivated && !isPasswordExpired(&entrySnapshot), entrySnapshot.ExpiresAt)
+			return true, err
+		}
+	}
+
+	dbMutex.Lock()
+	if current := db.Passwords[password]; current != nil {
+		delete(db.Devices, current.DeviceID)
+		delete(db.Passwords, password)
+		saveDBLazy()
+	}
+	dbMutex.Unlock()
+	serverWrapKeys.RemovePassword(password)
+	return true, nil
+}
+
+func deleteMainDevice(wgDev *device.Device, callbackToken string) (string, bool, error) {
+	peerMutationMu.Lock()
+	defer peerMutationMu.Unlock()
+
+	dbMutex.RLock()
+	deviceID, dev, exists := findMainDeviceByCallbackToken(db, callbackToken)
+	if !exists {
+		dbMutex.RUnlock()
+		return "", false, nil
+	}
+	deviceSnapshot := *dev
+	dbMutex.RUnlock()
+
+	if err := removePeerFromWG(wgDev, &deviceSnapshot); err != nil {
+		return deviceID, true, err
+	}
+	dbMutex.Lock()
+	if current := db.Devices[deviceID]; current != nil && current.PubKey == deviceSnapshot.PubKey {
+		delete(db.Devices, deviceID)
+		saveDBLazy()
+	}
+	dbMutex.Unlock()
+	return deviceID, true, nil
 }
 
 func cleanupExpiredPasswords(wgDev *device.Device) (int, error) {
-	dbMutex.Lock()
-	defer dbMutex.Unlock()
-	removed, err := cleanupExpiredPasswordsLocked(wgDev)
+	peerMutationMu.Lock()
+	defer peerMutationMu.Unlock()
+
+	type expiredPassword struct {
+		password string
+		entry    *PasswordEntry
+		device   *ClientDevice
+	}
+	dbMutex.RLock()
+	expired := make([]expiredPassword, 0)
+	for password, entry := range db.Passwords {
+		if !isPasswordExpired(entry) {
+			continue
+		}
+		item := expiredPassword{password: password, entry: entry}
+		if entry != nil {
+			if dev := db.Devices[entry.DeviceID]; dev != nil {
+				copy := *dev
+				item.device = &copy
+			}
+		}
+		expired = append(expired, item)
+	}
+	dbMutex.RUnlock()
+
+	removed := 0
+	var cleanupErrors []error
+	for _, item := range expired {
+		disablePasswordAccessState(item.password, false)
+		serverWrapKeys.RemovePassword(item.password)
+		if item.device != nil {
+			if err := removePeerFromWG(wgDev, item.device); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("expire password %s: %w", maskPassword(item.password), err))
+				continue
+			}
+		}
+
+		dbMutex.Lock()
+		if current := db.Passwords[item.password]; current == item.entry {
+			if current != nil {
+				delete(db.Devices, current.DeviceID)
+			}
+			delete(db.Passwords, item.password)
+			removed++
+		}
+		dbMutex.Unlock()
+	}
 	if removed > 0 {
 		saveDBLazy()
 	}
-	return removed, err
+	return removed, errors.Join(cleanupErrors...)
 }
 
 func expiredPasswordJanitor(ctx context.Context, wgDev *device.Device) {
@@ -1063,11 +1228,21 @@ func expiredPasswordJanitor(ctx context.Context, wgDev *device.Device) {
 }
 
 func syncPersistedPeersToWG(wgDev *device.Device) error {
-	dbMutex.Lock()
-	defer dbMutex.Unlock()
-	count := 0
+	peerMutationMu.Lock()
+	defer peerMutationMu.Unlock()
+
+	dbMutex.RLock()
+	devices := make(map[string]ClientDevice, len(db.Devices))
 	for deviceID, dev := range db.Devices {
-		if err := upsertPeerInWG(wgDev, dev); err != nil {
+		if dev != nil {
+			devices[deviceID] = *dev
+		}
+	}
+	dbMutex.RUnlock()
+
+	count := 0
+	for deviceID, dev := range devices {
+		if err := upsertPeerInWG(wgDev, &dev); err != nil {
 			return fmt.Errorf("device %s: %w", deviceID, err)
 		}
 		count++
@@ -1079,15 +1254,14 @@ func syncPersistedPeersToWG(wgDev *device.Device) error {
 }
 
 func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
-	dbMutex.Lock()
-
-	removed, cleanupErr := cleanupExpiredPasswordsLocked(wgDev)
+	removed, cleanupErr := cleanupExpiredPasswords(wgDev)
 	if cleanupErr != nil {
 		log.Printf("[DB] Очистка истёкших паролей: %v", cleanupErr)
 	}
 	if removed > 0 {
-		saveDBLazy()
+		log.Printf("[DB] Удалено истёкших паролей: %d", removed)
 	}
+	dbMutex.Lock()
 
 	txt := "🔐 *Пароли:*\n\n"
 	txt += fmt.Sprintf("🔒 Главный: `%s` (владелец)\n", db.MainPassword)

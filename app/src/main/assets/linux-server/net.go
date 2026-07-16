@@ -661,6 +661,92 @@ func parseGetConfRequest(packet []byte) (getConfRequest, bool, error) {
 	}, true, nil
 }
 
+func provisionClientConfig(wgDev *device.Device, keys *wgKeys, request getConfRequest, connPassword string, connIsMainPass bool) (string, string, error) {
+	peerMutationMu.Lock()
+	defer peerMutationMu.Unlock()
+
+	dbMutex.Lock()
+	isMainPass := connIsMainPass && connPassword == db.MainPassword
+	entry, isGeneratedPassword := db.Passwords[connPassword]
+	valid := isMainPass || (isGeneratedPassword && !isPasswordExpired(entry))
+	if !valid {
+		response := "DENIED:wrong_password"
+		if isGeneratedPassword && isPasswordExpired(entry) {
+			response = "DENIED:expired"
+		}
+		dbMutex.Unlock()
+		return "", response, nil
+	}
+	if isGeneratedPassword && entry.IsDeactivated {
+		dbMutex.Unlock()
+		return "", "DENIED:deactivated", nil
+	}
+	if isGeneratedPassword && entry.DeviceID != "" && entry.DeviceID != request.DeviceID {
+		dbMutex.Unlock()
+		return "", "DENIED:device_mismatch", nil
+	}
+
+	boundPassword := false
+	if isGeneratedPassword && entry.DeviceID == "" {
+		entry.DeviceID = request.DeviceID
+		boundPassword = true
+	}
+
+	dev, exists := db.Devices[request.DeviceID]
+	createdDevice := false
+	if !exists {
+		clientIP := getNextIP()
+		dbMutex.Unlock()
+
+		privateKey, publicKey, err := generateKeyPair()
+		if err != nil || clientIP == "" {
+			dbMutex.Lock()
+			if boundPassword && entry.DeviceID == request.DeviceID {
+				entry.DeviceID = ""
+				saveDBLazy()
+			}
+			dbMutex.Unlock()
+			if err == nil {
+				err = errors.New("WireGuard address pool is exhausted")
+			}
+			return "", "NOCONF", err
+		}
+
+		dev = &ClientDevice{
+			DeviceID: request.DeviceID,
+			IP:       clientIP,
+			PrivKey:  privateKey,
+			PubKey:   publicKey,
+		}
+		dbMutex.Lock()
+		db.Devices[request.DeviceID] = dev
+		createdDevice = true
+	}
+
+	deviceSnapshot := *dev
+	if boundPassword || createdDevice {
+		saveDBLazy()
+	}
+	dbMutex.Unlock()
+
+	if err := upsertPeerInWG(wgDev, &deviceSnapshot); err != nil {
+		dbMutex.Lock()
+		if createdDevice {
+			if current := db.Devices[request.DeviceID]; current != nil && current.PubKey == deviceSnapshot.PubKey {
+				delete(db.Devices, request.DeviceID)
+			}
+		}
+		if boundPassword && entry.DeviceID == request.DeviceID {
+			entry.DeviceID = ""
+		}
+		saveDBLazy()
+		dbMutex.Unlock()
+		return "", "NOCONF", err
+	}
+
+	return buildClientConfig(keys.serverPublic, deviceSnapshot.PrivKey, deviceSnapshot.IP, request.ClientPort), "", nil
+}
+
 func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacketListener, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
 	// Добавлен defer для предотвращения утечки сокетов при ошибках на любом этапе функции
 	defer clientConn.Close()
@@ -691,20 +777,8 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 	connPassword := identity.Password
 	connIsMainPass := identity.IsMain
 
-	passwordActive := func() bool {
-		if connIsMainPass {
-			dbMutex.RLock()
-			active := db.MainPassword == connPassword
-			dbMutex.RUnlock()
-			return active
-		}
-
-		dbMutex.RLock()
-		entry, exists := db.Passwords[connPassword]
-		active := exists && entry != nil && !isPasswordExpired(entry) && !entry.IsDeactivated
-		dbMutex.RUnlock()
-		return active
-	}
+	accessState := getPasswordAccessState(connPassword, connIsMainPass)
+	passwordActive := accessState.IsActive
 	if !passwordActive() {
 		log.Printf("[WRAP] Отказ: неактивный ключ %s для %s", maskPassword(connPassword), clientConn.RemoteAddr())
 		return
@@ -731,7 +805,6 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 			log.Printf("[WG] Отказ: некорректный GETCONF от %s: %v", clientConn.RemoteAddr(), getConfErr)
 			return
 		}
-		clientPort := getConf.ClientPort
 		deviceID := getConf.DeviceID
 		password := getConf.Password
 
@@ -741,82 +814,18 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 			return
 		}
 
-		dbMutex.Lock()
-
-		isMainPass := connIsMainPass && password == db.MainPassword
-		entry, isGenPass := db.Passwords[connPassword]
-		valid := isMainPass || (isGenPass && !isPasswordExpired(entry))
-
-		if valid && isGenPass && entry.IsDeactivated {
-			clientConn.Write([]byte("DENIED:deactivated"))
-			log.Printf("[WG] Отказ: пароль %s деактивирован, запрос от %s", maskPassword(password), deviceID)
-			dbMutex.Unlock()
+		config, response, provisionErr := provisionClientConfig(wgDev, keys, getConf, connPassword, connIsMainPass)
+		if provisionErr != nil {
+			log.Printf("[WG] Не удалось подготовить конфигурацию для %s: %v", deviceID, provisionErr)
+		}
+		if response != "" {
+			_, _ = clientConn.Write([]byte(response))
+			if response != "NOCONF" {
+				log.Printf("[WG] Отказ %s для устройства %s", response, deviceID)
+			}
 			return
-		} else if valid && isGenPass && entry.DeviceID != "" && entry.DeviceID != deviceID {
-			clientConn.Write([]byte("DENIED:device_mismatch"))
-			log.Printf("[WG] Отказ: пароль %s привязан к %s, запрос от %s", maskPassword(password), entry.DeviceID, deviceID)
-			dbMutex.Unlock()
-			return
-		} else if valid {
-			boundPassword := false
-			if isGenPass && entry.DeviceID == "" {
-				entry.DeviceID = deviceID
-				boundPassword = true
-				saveDBLazy()
-				log.Printf("[WG] Пароль %s привязан к устройству %s", maskPassword(password), deviceID)
-			}
-
-			dev, exists := db.Devices[deviceID]
-			createdDevice := false
-			if !exists {
-				dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP()}
-				privB64, pubB64, keyErr := generateKeyPair()
-				if keyErr == nil && dev.IP != "" {
-					dev.PrivKey = privB64
-					dev.PubKey = pubB64
-					db.Devices[deviceID] = dev
-					createdDevice = true
-					saveDBLazy()
-					log.Printf("[WG] Новое устройство %s (IP: %s)", deviceID, dev.IP)
-				} else {
-					dev = nil
-				}
-			}
-			if dev != nil {
-				if err := upsertPeerInWG(wgDev, dev); err != nil {
-					log.Printf("[WG] Не удалось настроить peer %s: %v", deviceID, err)
-					if createdDevice {
-						delete(db.Devices, deviceID)
-					}
-					if boundPassword {
-						entry.DeviceID = ""
-					}
-					saveDBLazy()
-					_, _ = clientConn.Write([]byte("NOCONF"))
-					dbMutex.Unlock()
-					return
-				}
-				clientConn.Write([]byte(buildClientConfig(keys.serverPublic, dev.PrivKey, dev.IP, clientPort)))
-			} else {
-				if boundPassword {
-					entry.DeviceID = ""
-					saveDBLazy()
-				}
-				clientConn.Write([]byte("NOCONF"))
-			}
-			dbMutex.Unlock()
-			if dev == nil {
-				return
-			}
-		} else {
-			if isGenPass && isPasswordExpired(entry) {
-				clientConn.Write([]byte("DENIED:expired"))
-				log.Printf("[WG] Отказ: пароль %s истёк, от %s", maskPassword(password), deviceID)
-			} else {
-				clientConn.Write([]byte("DENIED:wrong_password"))
-				log.Printf("[WG] Отказ (неверный пароль) от %s", deviceID)
-			}
-			dbMutex.Unlock()
+		}
+		if _, err := clientConn.Write([]byte(config)); err != nil {
 			return
 		}
 
