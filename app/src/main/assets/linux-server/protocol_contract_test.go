@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +73,9 @@ func TestParseGetConfRequest(t *testing.T) {
 		{name: "zero port", packet: "GETCONF:0|device|secret", recognized: true, wantErr: true},
 		{name: "large port", packet: "GETCONF:65536|device|secret", recognized: true, wantErr: true},
 		{name: "empty device", packet: "GETCONF:9000||secret", recognized: true, wantErr: true},
+		{name: "device with newline", packet: "GETCONF:9000|device%0Aunsafe\n|secret", recognized: true, wantErr: true},
+		{name: "device with delimiter", packet: "GETCONF:9000|device/unsafe|secret", recognized: true, wantErr: true},
+		{name: "oversized device", packet: "GETCONF:9000|" + strings.Repeat("a", 129) + "|secret", recognized: true, wantErr: true},
 	}
 
 	for _, tc := range tests {

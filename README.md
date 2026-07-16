@@ -222,7 +222,7 @@ WDTT-сервер поддерживает две модели подключе�
 
 ## Автоматические проверки
 
-- `Server CI` выполняет unit/contract-тесты, `go vet`, race detector, короткий fuzzing RTP AEAD и GETCONF, сборку Linux `amd64`/`arm64`, `govulncheck` и реальный Docker smoke. Контейнерный тест проверяет WRAP → DTLS → GETCONF, отказ при несовпадении паролей, loopback-привязку WireGuard, NAT/firewall, права файлов, корректный SIGTERM, сохранение ключей и восстановление устройства после рестарта. Он не обращается к VK или настоящему Telegram API.
+- `Server CI` выполняет unit/contract- и fault-injection-тесты, контролирует минимальное покрытие, запускает `go vet`, race detector, короткий fuzzing RTP AEAD и GETCONF, сборку Linux `amd64`/`arm64`, `govulncheck` и реальный Docker smoke. Контейнерный тест проверяет устойчивость к hostile UDP, WRAP → DTLS → GETCONF, отказ при несовпадении паролей, loopback-привязку WireGuard, точную изоляцию VPN-клиентов и хоста в firewall, права файлов, сохранение ключей и устройства после рестарта, а также graceful shutdown во всех четырёх фазах соединения. Отдельная job сверяет golden wire fixture с фактическим Go-клиентом Android и WRAP-A реализацией iOS. Тесты не обращаются к VK или настоящему Telegram API.
 - `Android CI` проверяет Go-модуль клиента, собирает нативный клиент для `arm64-v8a`, `armeabi-v7a` и `x86_64`, запускает Gradle unit/lint-задачи и собирает release APK без публикации.
 - `Docker CI` собирает образ для `linux/amd64` и `linux/arm64`, но не публикует его.
 - `Workflow lint` проверяет синтаксис и выражения GitHub Actions, а `Dependency Review` блокирует pull request с новой зависимостью высокой или критической опасности.

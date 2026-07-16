@@ -234,6 +234,44 @@ func TestWrapKeyStoreUnwrapSelectsKey(t *testing.T) {
 	}
 }
 
+func TestAcceptWrappedPacketAuthenticatesBeforeAdmission(t *testing.T) {
+	const password = "admission-main-password"
+	keys := newWrapKeyStore()
+	if err := keys.SetPasswords(password, nil); err != nil {
+		t.Fatalf("SetPasswords: %v", err)
+	}
+
+	key := testKey(t, password)
+	aead, err := getAEAD(key)
+	if err != nil {
+		t.Fatalf("getAEAD: %v", err)
+	}
+	payload := []byte("DTLS client hello fixture")
+	wire := make([]byte, obfsWrapWireLen(len(payload), NewObfsConfig()))
+	n, err := obfsWrapPacketInto(wire, aead, payload, NewObfsConfig(), NewObfsState())
+	if err != nil {
+		t.Fatalf("wrap valid packet: %v", err)
+	}
+	if !acceptWrappedPacket(keys, wire[:n]) {
+		t.Fatal("authenticated WRAP packet was rejected")
+	}
+
+	badRTP := append([]byte(nil), wire[:n]...)
+	badRTP[len(badRTP)-1] ^= 0xff
+	for name, packet := range map[string][]byte{
+		"raw DTLS":      {0x16, 0xfe, 0xfd, 0x00},
+		"forged RTP":    badRTP,
+		"empty packet":  {},
+		"oversized RTP": append([]byte{0x80, 0x6f}, make([]byte, maxWrappedPacketSize)...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if acceptWrappedPacket(keys, packet) {
+				t.Fatal("unauthenticated datagram passed the admission filter")
+			}
+		})
+	}
+}
+
 type fakeAddr string
 
 func (fakeAddr) Network() string  { return "fake" }
@@ -344,6 +382,58 @@ func TestWrapPacketConnEndToEnd(t *testing.T) {
 		if !bytes.Equal(rbuf[:rn], msg) {
 			t.Fatalf("client->server payload mismatch #%d", i)
 		}
+	}
+}
+
+func TestWrapPacketConnSkipsCorruptDatagramAfterKeySelection(t *testing.T) {
+	const password = "selected-session-password"
+	keys := newWrapKeyStore()
+	if err := keys.SetPasswords(password, nil); err != nil {
+		t.Fatalf("SetPasswords: %v", err)
+	}
+	clientRaw, serverRaw := newFakePair()
+	server := &wrapPacketConn{inner: serverRaw, keys: keys}
+
+	key := testKey(t, password)
+	aead, err := getAEAD(key)
+	if err != nil {
+		t.Fatalf("getAEAD: %v", err)
+	}
+	config := NewObfsConfig()
+	state := NewObfsState()
+	wrap := func(payload []byte) []byte {
+		dst := make([]byte, obfsWrapWireLen(len(payload), config))
+		n, wrapErr := obfsWrapPacketInto(dst, aead, payload, config, state)
+		if wrapErr != nil {
+			t.Fatalf("wrap: %v", wrapErr)
+		}
+		return dst[:n]
+	}
+
+	first := wrap([]byte("GETCONF:51820|selected-device|" + password))
+	if _, err := clientRaw.WriteTo(first, clientRaw.remote); err != nil {
+		t.Fatalf("write first packet: %v", err)
+	}
+	readBuffer := make([]byte, 2048)
+	if _, _, err := server.ReadFrom(readBuffer); err != nil {
+		t.Fatalf("select key: %v", err)
+	}
+
+	corrupt := append([]byte(nil), wrap([]byte("corrupt me"))...)
+	corrupt[len(corrupt)-1] ^= 0xff
+	if _, err := clientRaw.WriteTo(corrupt, clientRaw.remote); err != nil {
+		t.Fatalf("write corrupt packet: %v", err)
+	}
+	want := []byte("valid packet after corruption")
+	if _, err := clientRaw.WriteTo(wrap(want), clientRaw.remote); err != nil {
+		t.Fatalf("write valid packet: %v", err)
+	}
+	n, _, err := server.ReadFrom(readBuffer)
+	if err != nil {
+		t.Fatalf("read after corrupt packet: %v", err)
+	}
+	if !bytes.Equal(readBuffer[:n], want) {
+		t.Fatalf("payload = %q, want %q", readBuffer[:n], want)
 	}
 }
 

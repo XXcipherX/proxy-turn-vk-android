@@ -81,13 +81,29 @@ docker exec "$CONTAINER" sh -exc '
   ss -H -lun | grep -Eq "127[.]0[.]0[.]1:56001([[:space:]]|$)"
   ! ss -H -lun | grep -Eq "(0[.]0[.]0[.]0|\[::\]):56001([[:space:]]|$)"
   ss -H -lun | grep -Eq "(\\*|0[.]0[.]0[.]0|\\[::\\]):56000([[:space:]]|$)"
-  iptables -w -t nat -S POSTROUTING | grep -F "10.66.66.0/24" | grep -Fq "WDTT_MANAGED"
-  iptables -w -S FORWARD | grep -F -- "-i wdtt0" | grep -Fq "WDTT_MANAGED"
-  iptables -w -S FORWARD | grep -F -- "-o wdtt0" | grep -Fq "WDTT_MANAGED"
+  ext_iface="$(ip -4 route show default | grep -o "dev [^ ]*" | head -n1 | cut -d" " -f2)"
+  [ -n "$ext_iface" ]
+  iptables -w -t nat -C POSTROUTING -s 10.66.66.0/24 -o "$ext_iface" -m comment --comment WDTT_MANAGED -j MASQUERADE
+  iptables -w -C INPUT -i wdtt0 -m comment --comment WDTT_MANAGED -j DROP
+  iptables -w -C FORWARD -i wdtt0 -o wdtt0 -m comment --comment WDTT_MANAGED -j DROP
+  iptables -w -C FORWARD -i wdtt0 -s 10.66.66.0/24 -o "$ext_iface" -m comment --comment WDTT_MANAGED -j ACCEPT
+  iptables -w -C FORWARD -i "$ext_iface" -o wdtt0 -d 10.66.66.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment WDTT_MANAGED -j ACCEPT
+  iptables -w -C FORWARD -i wdtt0 -m comment --comment WDTT_MANAGED -j DROP
+  iptables -w -C FORWARD -o wdtt0 -m comment --comment WDTT_MANAGED -j DROP
+  ! iptables -w -C FORWARD -i wdtt0 -m comment --comment WDTT_MANAGED -j ACCEPT
+  ! iptables -w -C FORWARD -o wdtt0 -m comment --comment WDTT_MANAGED -j ACCEPT
   [ "$(stat -c %a /etc/wdtt)" = "700" ]
   [ "$(stat -c %a /etc/wdtt/passwords.json)" = "600" ]
   [ "$(stat -c %a /etc/wdtt/wg-keys.dat)" = "600" ]
+  [ "$(wc -l < /etc/wdtt/wg-keys.dat)" = "2" ]
 '
+
+(
+  cd "$SERVER_DIR"
+  WDTT_SMOKE_ADDR=127.0.0.1:56000 \
+  WDTT_SMOKE_PASSWORD="$PASSWORD" \
+    go test -mod=readonly -count=1 -run '^TestRunningServerSurvivesHostileUDP$' -timeout=45s -v .
+)
 
 (
   cd "$SERVER_DIR"
@@ -98,6 +114,65 @@ docker exec "$CONTAINER" sh -exc '
 
 keys_before="$(docker exec "$CONTAINER" sha256sum /etc/wdtt/wg-keys.dat | awk '{print $1}')"
 stop_server_cleanly
+
+exercise_shutdown_phase() {
+  local phase="$1"
+  local control="$STATE_DIR/shutdown-$phase"
+  local test_log="$control.log"
+  local test_pid
+  rm -f "$control.ready" "$control.release" "$test_log"
+
+  start_server
+  (
+    cd "$SERVER_DIR"
+    WDTT_SMOKE_ADDR=127.0.0.1:56000 \
+    WDTT_SMOKE_PASSWORD="$PASSWORD" \
+    WDTT_SHUTDOWN_PHASE="$phase" \
+    WDTT_SHUTDOWN_CONTROL="$control" \
+      go test -mod=readonly -count=1 -run '^TestRunningServerShutdownPhase$' -timeout=45s -v .
+  ) >"$test_log" 2>&1 &
+  test_pid=$!
+
+  for _ in $(seq 1 300); do
+    if [ -f "$control.ready" ]; then
+      break
+    fi
+    if ! kill -0 "$test_pid" 2>/dev/null; then
+      cat "$test_log" >&2
+      echo "Shutdown client exited before reaching phase $phase" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  if [ ! -f "$control.ready" ]; then
+    cat "$test_log" >&2
+    echo "Shutdown client did not reach phase $phase" >&2
+    return 1
+  fi
+
+  local started elapsed exit_code
+  started="$(date +%s)"
+  docker stop --time 8 "$CONTAINER" >/dev/null
+  elapsed=$(( $(date +%s) - started ))
+  exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$CONTAINER")"
+  touch "$control.release"
+  if ! wait "$test_pid"; then
+    cat "$test_log" >&2
+    return 1
+  fi
+  if [ "$exit_code" != "0" ]; then
+    docker logs "$CONTAINER" 2>&1 || true
+    echo "Shutdown phase $phase exited with $exit_code, want 0" >&2
+    return 1
+  fi
+  if [ "$elapsed" -gt 7 ]; then
+    docker logs "$CONTAINER" 2>&1 || true
+    echo "Shutdown phase $phase took ${elapsed}s" >&2
+    return 1
+  fi
+  docker rm "$CONTAINER" >/dev/null
+}
+
 sudo grep -Fq 'ci-smoke-device-0001' "$STATE_DIR/passwords.json"
 docker rm "$CONTAINER" >/dev/null
 
@@ -117,3 +192,7 @@ docker logs "$CONTAINER" 2>&1 | grep -F '[WG] Восстановлено сох�
 )
 
 stop_server_cleanly
+
+for phase in pre-getconf post-getconf post-ready proxy; do
+  exercise_shutdown_phase "$phase"
+done

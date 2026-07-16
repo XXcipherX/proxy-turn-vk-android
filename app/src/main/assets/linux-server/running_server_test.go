@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/cipher"
+	"crypto/rand"
 	"crypto/tls"
 	"net"
 	"os"
@@ -180,5 +181,125 @@ func TestRunningServerProtocol(t *testing.T) {
 	}
 	if !bytes.Equal(response[:n], []byte("DENIED:password_mismatch")) {
 		t.Fatalf("mismatch response = %q", response[:n])
+	}
+}
+
+func TestRunningServerSurvivesHostileUDP(t *testing.T) {
+	serverAddr := os.Getenv("WDTT_SMOKE_ADDR")
+	if serverAddr == "" {
+		t.Skip("set WDTT_SMOKE_ADDR to run the external server smoke test")
+	}
+	password := os.Getenv("WDTT_SMOKE_PASSWORD")
+	if password == "" {
+		t.Fatal("WDTT_SMOKE_PASSWORD is required with WDTT_SMOKE_ADDR")
+	}
+	remote, err := net.ResolveUDPAddr("udp4", serverAddr)
+	if err != nil {
+		t.Fatalf("resolve server: %v", err)
+	}
+
+	const hostileSources = 96
+	sockets := make([]*net.UDPConn, 0, hostileSources)
+	for source := 0; source < hostileSources; source++ {
+		conn, listenErr := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+		if listenErr != nil {
+			t.Fatalf("hostile source %d: %v", source, listenErr)
+		}
+		sockets = append(sockets, conn)
+		packet := make([]byte, 96)
+		if _, randomErr := rand.Read(packet); randomErr != nil {
+			t.Fatalf("random hostile packet: %v", randomErr)
+		}
+		if source%2 == 0 {
+			packet[0] = 0x80
+			packet[1] = 0x6f
+		} else {
+			packet[0] = 0x16
+			packet[1] = 0xfe
+			packet[2] = 0xfd
+		}
+		if _, writeErr := conn.WriteToUDP(packet, remote); writeErr != nil {
+			t.Fatalf("hostile source %d write: %v", source, writeErr)
+		}
+	}
+	for _, conn := range sockets {
+		_ = conn.Close()
+	}
+
+	valid := openSmokeDTLS(t, serverAddr, password)
+	_ = valid.Close()
+}
+
+func TestRunningServerShutdownPhase(t *testing.T) {
+	serverAddr := os.Getenv("WDTT_SMOKE_ADDR")
+	phase := os.Getenv("WDTT_SHUTDOWN_PHASE")
+	controlPath := os.Getenv("WDTT_SHUTDOWN_CONTROL")
+	if serverAddr == "" || phase == "" || controlPath == "" {
+		t.Skip("set WDTT smoke shutdown variables to run this external test")
+	}
+	password := os.Getenv("WDTT_SMOKE_PASSWORD")
+	if password == "" {
+		t.Fatal("WDTT_SMOKE_PASSWORD is required")
+	}
+
+	conn := openSmokeDTLS(t, serverAddr, password)
+	defer conn.Close()
+	response := make([]byte, 4096)
+	if phase != "pre-getconf" {
+		request := "GETCONF:9000|ci-shutdown-" + phase + "|" + password
+		if _, err := conn.Write([]byte(request)); err != nil {
+			t.Fatalf("write GETCONF: %v", err)
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			t.Fatalf("set GETCONF deadline: %v", err)
+		}
+		n, err := conn.Read(response)
+		if err != nil {
+			t.Fatalf("read GETCONF: %v", err)
+		}
+		if !strings.Contains(string(response[:n]), "[Interface]") {
+			t.Fatalf("invalid GETCONF response: %q", response[:n])
+		}
+	}
+	if phase == "post-ready" || phase == "proxy" {
+		if _, err := conn.Write([]byte("READY")); err != nil {
+			t.Fatalf("write READY: %v", err)
+		}
+		n, err := conn.Read(response)
+		if err != nil {
+			t.Fatalf("read READY response: %v", err)
+		}
+		if !bytes.Equal(response[:n], []byte("READY_OK")) {
+			t.Fatalf("READY response = %q", response[:n])
+		}
+	}
+	if phase == "proxy" {
+		wireGuardPacket := make([]byte, 148)
+		if _, err := rand.Read(wireGuardPacket); err != nil {
+			t.Fatalf("create WireGuard-shaped packet: %v", err)
+		}
+		if _, err := conn.Write(wireGuardPacket); err != nil {
+			t.Fatalf("write first tunnel packet: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if phase != "pre-getconf" && phase != "post-getconf" && phase != "post-ready" && phase != "proxy" {
+		t.Fatalf("unknown shutdown phase %q", phase)
+	}
+
+	if err := os.WriteFile(controlPath+".ready", []byte(phase+"\n"), 0600); err != nil {
+		t.Fatalf("write ready marker: %v", err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(controlPath + ".release"); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat release marker: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for shutdown release marker")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

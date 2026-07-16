@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -55,5 +56,38 @@ func TestLoadOrGenerateKeysPersistsValidPairs(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0600 {
 		t.Fatalf("key permissions = %04o, want 0600", got)
+	}
+}
+
+func TestLoadOrGenerateKeysMigratesLegacyFourLineFile(t *testing.T) {
+	dir := t.TempDir()
+	serverPrivate, serverPublic, err := generateKeyPair()
+	if err != nil {
+		t.Fatalf("generate server pair: %v", err)
+	}
+	clientPrivate, clientPublic, err := generateKeyPair()
+	if err != nil {
+		t.Fatalf("generate legacy client pair: %v", err)
+	}
+	path := filepath.Join(dir, "wg-keys.dat")
+	legacy := strings.Join([]string{serverPrivate, serverPublic, clientPrivate, clientPublic, ""}, "\n")
+	if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
+		t.Fatalf("write legacy keys: %v", err)
+	}
+
+	keys, err := loadOrGenerateKeys(dir)
+	if err != nil {
+		t.Fatalf("loadOrGenerateKeys: %v", err)
+	}
+	if keys.serverPrivate != serverPrivate || keys.serverPublic != serverPublic {
+		t.Fatal("server identity changed during migration")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read migrated file: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 || lines[0] != serverPrivate || lines[1] != serverPublic {
+		t.Fatalf("migrated key file has %d lines, want the original server pair", len(lines))
 	}
 }
