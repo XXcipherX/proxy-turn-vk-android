@@ -664,6 +664,10 @@ func parseGetConfRequest(packet []byte) (getConfRequest, bool, error) {
 func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacketListener, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
 	// Добавлен defer для предотвращения утечки сокетов при ошибках на любом этапе функции
 	defer clientConn.Close()
+	stopShutdownDeadline := context.AfterFunc(ctx, func() {
+		_ = clientConn.SetDeadline(time.Now())
+	})
+	defer stopShutdownDeadline()
 
 	atomic.AddInt64(&totalConns, 1)
 
@@ -866,10 +870,11 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 	pctx, pcancel := context.WithCancel(ctx)
 	defer pcancel()
 
-	context.AfterFunc(pctx, func() {
-		clientConn.SetDeadline(time.Now())
-		wgConn.SetDeadline(time.Now())
+	stopProxyDeadline := context.AfterFunc(pctx, func() {
+		_ = clientConn.SetDeadline(time.Now())
+		_ = wgConn.SetDeadline(time.Now())
 	})
+	defer stopProxyDeadline()
 
 	flushStats := func() bool {
 		up := atomic.SwapInt64(&localUpBytes, 0)
