@@ -99,7 +99,15 @@ func validateMainPassword(password string) error {
 	return nil
 }
 
-var publicIP string = ""
+var publicIPCache struct {
+	sync.RWMutex
+	value string
+}
+
+var (
+	publicIPHTTPClient = &http.Client{Timeout: 5 * time.Second}
+	publicIPServiceURL = "https://api.ipify.org"
+)
 
 var (
 	dbRevision       atomic.Uint64
@@ -120,21 +128,35 @@ var (
 )
 
 func getPublicIP() string {
-	if publicIP != "" {
-		return publicIP
+	publicIPCache.RLock()
+	cached := publicIPCache.value
+	publicIPCache.RUnlock()
+	if cached != "" {
+		return cached
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get("https://api.ipify.org")
+	resp, err := publicIPHTTPClient.Get(publicIPServiceURL)
 	if err != nil {
 		return "YOUR_SERVER_IP"
 	}
 	defer resp.Body.Close()
-	ipBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return "YOUR_SERVER_IP"
 	}
-	publicIP = string(bytes.TrimSpace(ipBytes))
-	return publicIP
+	ipBytes, err := io.ReadAll(io.LimitReader(resp.Body, 65))
+	if err != nil || len(ipBytes) > 64 {
+		return "YOUR_SERVER_IP"
+	}
+	parsed := net.ParseIP(strings.TrimSpace(string(ipBytes)))
+	if parsed == nil || parsed.To4() == nil || !parsed.IsGlobalUnicast() || parsed.IsPrivate() || parsed.IsLoopback() {
+		return "YOUR_SERVER_IP"
+	}
+	publicIPCache.Lock()
+	if publicIPCache.value == "" {
+		publicIPCache.value = parsed.To4().String()
+	}
+	cached = publicIPCache.value
+	publicIPCache.Unlock()
+	return cached
 }
 
 func stripVkUrl(url string) string {
@@ -519,21 +541,33 @@ func validateStoredPassword(password string) error {
 	return nil
 }
 
+func parsePortTriplet(ports string) (string, error) {
+	parts := strings.Split(ports, ",")
+	if len(parts) != 3 {
+		return "", errors.New("ports must contain exactly three comma-separated values")
+	}
+	parsed := make([]string, 0, 3)
+	seen := make(map[int]struct{}, 3)
+	for _, rawPort := range parts {
+		port, err := strconv.Atoi(strings.TrimSpace(rawPort))
+		if err != nil || port < 1 || port > 65535 {
+			return "", fmt.Errorf("invalid port %q", rawPort)
+		}
+		if _, exists := seen[port]; exists {
+			return "", fmt.Errorf("port %d is duplicated", port)
+		}
+		seen[port] = struct{}{}
+		parsed = append(parsed, strconv.Itoa(port))
+	}
+	return strings.Join(parsed, ","), nil
+}
+
 func validateStoredPorts(ports string) error {
 	if ports == "" {
 		return nil
 	}
-	parts := strings.Split(ports, ",")
-	if len(parts) != 3 {
-		return errors.New("ports must contain exactly three comma-separated values")
-	}
-	for _, rawPort := range parts {
-		port, err := strconv.Atoi(strings.TrimSpace(rawPort))
-		if err != nil || port < 1 || port > 65535 {
-			return fmt.Errorf("invalid port %q", rawPort)
-		}
-	}
-	return nil
+	_, err := parsePortTriplet(ports)
+	return err
 }
 
 func validateStoredVKHash(hash string) error {
@@ -1114,6 +1148,11 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 						sendTelegram(token, adminID, fmt.Sprintf("✅ Устройство `%s` удалено", devID), nil)
 					}
 
+				} else if strings.HasPrefix(data, "listpage_") {
+					page, pageErr := strconv.Atoi(strings.TrimPrefix(data, "listpage_"))
+					if pageErr == nil && page >= 0 {
+						sendPasswordListPage(token, adminID, wgDev, page)
+					}
 				} else if data == "backlist" {
 					sendPasswordList(token, adminID, wgDev)
 				} else if data == "ports_def" {
@@ -1152,30 +1191,14 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 			}
 
 			if waitingForPorts {
-				parts := strings.Split(cmd, ",")
-				if len(parts) != 3 {
-					sendTelegram(token, adminID, "❌ Неверный формат. Укажите 3 порта через запятую (например: 56000,56001,9000):", nil)
-					continue
-				}
-				p1 := strings.TrimSpace(parts[0])
-				p2 := strings.TrimSpace(parts[1])
-				p3 := strings.TrimSpace(parts[2])
-
-				if _, err := strconv.Atoi(p1); err != nil {
-					sendTelegram(token, adminID, "❌ Неверный порт. Повторите ввод:", nil)
-					continue
-				}
-				if _, err := strconv.Atoi(p2); err != nil {
-					sendTelegram(token, adminID, "❌ Неверный порт. Повторите ввод:", nil)
-					continue
-				}
-				if _, err := strconv.Atoi(p3); err != nil {
-					sendTelegram(token, adminID, "❌ Неверный порт. Повторите ввод:", nil)
+				canonicalPorts, portErr := parsePortTriplet(cmd)
+				if portErr != nil {
+					sendTelegram(token, adminID, fmt.Sprintf("❌ Неверные порты: %v. Укажите три разных значения от 1 до 65535:", portErr), nil)
 					continue
 				}
 
 				waitingForPorts = false
-				tempPorts = fmt.Sprintf("%s,%s,%s", p1, p2, p3)
+				tempPorts = canonicalPorts
 				waitingForHash = true
 				sendTelegram(token, adminID, "🔑 Укажите VK хеш (или несколько через запятую):", nil)
 				continue
@@ -1554,7 +1577,13 @@ func syncPersistedPeersToWG(wgDev *device.Device) error {
 	return nil
 }
 
+const telegramListPageSize = 15
+
 func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
+	sendPasswordListPage(token, adminID, wgDev, 0)
+}
+
+func sendPasswordListPage(token string, adminID int64, wgDev *device.Device, page int) {
 	removed, cleanupErr := cleanupExpiredPasswords(wgDev)
 	if cleanupErr != nil {
 		log.Printf("[DB] Очистка истёкших паролей: %v", cleanupErr)
@@ -1562,32 +1591,47 @@ func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
 	if removed > 0 {
 		log.Printf("[DB] Удалено истёкших паролей: %d", removed)
 	}
-	dbMutex.Lock()
+	dbMutex.RLock()
 
 	txt := "🔐 *Пароли:*\n\n"
 	txt += fmt.Sprintf("🔒 Главный: `%s` (владелец)\n", db.MainPassword)
 
-	var inlineKb []map[string]interface{}
-	inlineKb = append(inlineKb, map[string]interface{}{
+	var keyboard [][]map[string]interface{}
+	keyboard = append(keyboard, []map[string]interface{}{{
 		"text":          "🔗 Ссылка на главный пароль",
 		"callback_data": "mainlink",
-	})
+	}})
 	mainDevices := mainDeviceIDs(db)
+	totalPages := (len(mainDevices) + telegramListPageSize - 1) / telegramListPageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+	if page < 0 {
+		page = 0
+	}
+	start := page * telegramListPageSize
+	end := start + telegramListPageSize
+	if end > len(mainDevices) {
+		end = len(mainDevices)
+	}
 	if len(mainDevices) == 0 {
 		txt += "📱 Устройства: _нет_\n\n"
 	} else {
-		txt += fmt.Sprintf("📱 Устройства главного пароля: %d\n", len(mainDevices))
-		for _, deviceID := range mainDevices {
+		txt += fmt.Sprintf("📱 Устройства главного пароля: %d (страница %d/%d)\n", len(mainDevices), page+1, totalPages)
+		for _, deviceID := range mainDevices[start:end] {
 			dev := db.Devices[deviceID]
 			txt += fmt.Sprintf("• `%s` — `%s`\n", deviceID, dev.IP)
 			label := deviceID
 			if len(label) > 20 {
 				label = label[:20] + "…"
 			}
-			inlineKb = append(inlineKb, map[string]interface{}{
+			keyboard = append(keyboard, []map[string]interface{}{{
 				"text":          "🗑 " + label,
 				"callback_data": "deldev_" + deviceCallbackToken(deviceID),
-			})
+			}})
 		}
 		txt += "\n"
 	}
@@ -1596,7 +1640,13 @@ func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
 		txt += "_Нет сгенерированных паролей._\n"
 	} else {
 		txt += fmt.Sprintf("_Активно: %d/%d_\n\n", len(db.Passwords), maxGeneratedPasswords)
-		for p, entry := range db.Passwords {
+		passwords := make([]string, 0, len(db.Passwords))
+		for password := range db.Passwords {
+			passwords = append(passwords, password)
+		}
+		sort.Strings(passwords)
+		for _, p := range passwords {
+			entry := db.Passwords[p]
 			status := "🟢"
 			if entry.DeviceID != "" {
 				status = "🔗"
@@ -1611,25 +1661,34 @@ func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
 				}
 			}
 			txt += fmt.Sprintf("%s `%s` (%s)\n", status, p, expiry)
-			inlineKb = append(inlineKb, map[string]interface{}{
+			keyboard = append(keyboard, []map[string]interface{}{{
 				"text":          "🔍 " + p,
 				"callback_data": "viewpass_" + p,
-			})
+			}})
 		}
 	}
 
 	txt += "\n🟢 = свободен | 🔗 = привязан"
-
-	var replyMarkup interface{}
-	if len(inlineKb) > 0 {
-		var keyboard [][]map[string]interface{}
-		for _, btn := range inlineKb {
-			keyboard = append(keyboard, []map[string]interface{}{btn})
+	if totalPages > 1 {
+		var navigation []map[string]interface{}
+		if page > 0 {
+			navigation = append(navigation, map[string]interface{}{
+				"text":          "⬅️ Назад",
+				"callback_data": fmt.Sprintf("listpage_%d", page-1),
+			})
 		}
-		replyMarkup = map[string]interface{}{"inline_keyboard": keyboard}
+		if page+1 < totalPages {
+			navigation = append(navigation, map[string]interface{}{
+				"text":          "Вперёд ➡️",
+				"callback_data": fmt.Sprintf("listpage_%d", page+1),
+			})
+		}
+		if len(navigation) > 0 {
+			keyboard = append(keyboard, navigation)
+		}
 	}
-	dbMutex.Unlock()
-	sendTelegram(token, adminID, txt, replyMarkup)
+	dbMutex.RUnlock()
+	sendTelegram(token, adminID, txt, map[string]interface{}{"inline_keyboard": keyboard})
 }
 
 func maskPassword(pass string) string {

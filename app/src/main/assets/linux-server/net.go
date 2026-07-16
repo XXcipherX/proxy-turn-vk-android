@@ -38,27 +38,6 @@ var bufPool = sync.Pool{
 func getBuf() *[]byte  { return bufPool.Get().(*[]byte) }
 func putBuf(b *[]byte) { bufPool.Put(b) }
 
-func enableBBR() {
-	log.Println("[SYS] Оптимизация TCP...")
-	out, _ := runCmd("bash", "-c", "sysctl net.ipv4.tcp_congestion_control")
-	if strings.Contains(out, "bbr") {
-		log.Println("[SYS] BBR уже активен ✓")
-		return
-	}
-	cmds := [][]string{
-		{"sysctl", "-w", "net.core.default_qdisc=fq"},
-		{"sysctl", "-w", "net.ipv4.tcp_congestion_control=bbr"},
-		{"sysctl", "-w", "net.core.rmem_max=25165824"},
-		{"sysctl", "-w", "net.core.wmem_max=25165824"},
-		{"sysctl", "-w", "net.ipv4.tcp_rmem=4096 87380 25165824"},
-		{"sysctl", "-w", "net.ipv4.tcp_wmem=4096 65536 25165824"},
-	}
-	for _, cmd := range cmds {
-		runCmd(cmd[0], cmd[1:]...)
-	}
-	log.Println("[SYS] BBR включен ✓")
-}
-
 var (
 	totalBytesFromClient int64
 	totalBytesToClient   int64
@@ -182,7 +161,7 @@ func getDefaultInterface() (string, error) {
 }
 
 type wgKeys struct {
-	serverPrivate, serverPublic, clientPrivate, clientPublic string
+	serverPrivate, serverPublic string
 }
 
 func b64ToHex(s string) (string, error) {
@@ -237,9 +216,6 @@ func validateWGKeys(keys *wgKeys) error {
 	if err := validateKeyPair(keys.serverPrivate, keys.serverPublic); err != nil {
 		return fmt.Errorf("server key pair: %w", err)
 	}
-	if err := validateKeyPair(keys.clientPrivate, keys.clientPublic); err != nil {
-		return fmt.Errorf("client key pair: %w", err)
-	}
 	return nil
 }
 
@@ -261,9 +237,7 @@ func writeWGKeysAtomic(dir, path string, keys *wgKeys) error {
 		tmp.Close()
 		return fmt.Errorf("secure temporary key file: %w", err)
 	}
-	content := fmt.Sprintf("%s\n%s\n%s\n%s\n",
-		keys.serverPrivate, keys.serverPublic,
-		keys.clientPrivate, keys.clientPublic)
+	content := fmt.Sprintf("%s\n%s\n", keys.serverPrivate, keys.serverPublic)
 	if _, err := tmp.WriteString(content); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write temporary key file: %w", err)
@@ -294,17 +268,26 @@ func loadOrGenerateKeys(dir string) (*wgKeys, error) {
 	data, err := os.ReadFile(f)
 	if err == nil {
 		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-		if len(lines) != 4 {
-			return nil, fmt.Errorf("invalid key file %s: expected 4 lines, got %d", f, len(lines))
+		if len(lines) != 2 && len(lines) != 4 {
+			return nil, fmt.Errorf("invalid key file %s: expected 2 or 4 lines, got %d", f, len(lines))
 		}
 		keys := &wgKeys{
 			serverPrivate: strings.TrimSpace(lines[0]),
 			serverPublic:  strings.TrimSpace(lines[1]),
-			clientPrivate: strings.TrimSpace(lines[2]),
-			clientPublic:  strings.TrimSpace(lines[3]),
 		}
 		if err := validateWGKeys(keys); err != nil {
 			return nil, fmt.Errorf("invalid key file %s: %w", f, err)
+		}
+		if len(lines) == 4 {
+			if err := validateKeyPair(strings.TrimSpace(lines[2]), strings.TrimSpace(lines[3])); err != nil {
+				return nil, fmt.Errorf("invalid legacy client key pair in %s: %w", f, err)
+			}
+			if err := writeWGKeysAtomic(dir, f, keys); err != nil {
+				return nil, fmt.Errorf("migrate key file %s: %w", f, err)
+			}
+			log.Printf("[WG] Формат %s безопасно мигрирован с 4 строк на 2", f)
+		} else if err := os.Chmod(f, 0600); err != nil {
+			return nil, fmt.Errorf("secure key file %s: %w", f, err)
 		}
 		log.Printf("[WG] Ключи загружены из %s", f)
 		return keys, nil
@@ -318,15 +301,9 @@ func loadOrGenerateKeys(dir string) (*wgKeys, error) {
 	if err != nil {
 		return nil, err
 	}
-	cPriv, cPub, err := generateKeyPair()
-	if err != nil {
-		return nil, err
-	}
 	keys := &wgKeys{
 		serverPrivate: sPriv,
 		serverPublic:  sPub,
-		clientPrivate: cPriv,
-		clientPublic:  cPub,
 	}
 	if err := validateWGKeys(keys); err != nil {
 		return nil, fmt.Errorf("validate generated keys: %w", err)

@@ -165,8 +165,6 @@ func main() {
 		log.Fatalf("[WG] Ключи: %v", err)
 	}
 
-	enableBBR()
-
 	wgDev, err := startUserspaceWG(keys, *wgPort)
 	if err != nil {
 		log.Fatalf("[WG] Запуск: %v", err)

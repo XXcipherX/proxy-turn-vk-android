@@ -19,9 +19,11 @@ import (
 )
 
 const (
-	wrapNonceLen          = 12
-	wrapKeyLen            = 32
-	maxWrappedPacketSize  = 2048
+	wrapNonceLen         = 12
+	wrapKeyLen           = 32
+	maxWrappedPacketSize = 2048
+	wrappedSocketBuffer  = 4 * 1024 * 1024
+	wrappedListenBacklog = 512
 )
 
 var (
@@ -306,6 +308,9 @@ func listenWrapped(addr *net.UDPAddr, keys *wrapKeyStore) (*wrapPacketListener, 
 		AcceptFilter: func(packet []byte) bool {
 			return acceptWrappedPacket(keys, packet)
 		},
+		Backlog:         wrappedListenBacklog,
+		ReadBufferSize:  wrappedSocketBuffer,
+		WriteBufferSize: wrappedSocketBuffer,
 	}).Listen("udp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("wrap: udp listen: %w", err)
