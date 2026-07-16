@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	wrapNonceLen = 12
-	wrapKeyLen   = 32
+	wrapNonceLen          = 12
+	wrapKeyLen            = 32
+	maxWrappedPacketSize  = 2048
 )
 
 var (
@@ -278,11 +279,34 @@ func obfsIsRTPPacket(wire []byte) bool {
 	return pt == 111 || pt == 96
 }
 
+func acceptWrappedPacket(keys *wrapKeyStore, raw []byte) bool {
+	if keys == nil || len(raw) == 0 || len(raw) > maxWrappedPacketSize || !obfsIsRTPPacket(raw) {
+		return false
+	}
+
+	var plaintext [maxWrappedPacketSize]byte
+	key, _, n, err := keys.Unwrap(raw, plaintext[:])
+	if len(key) > 0 {
+		zeroBytes(key)
+	}
+	if n > 0 {
+		zeroBytes(plaintext[:n])
+	}
+	return err == nil
+}
+
 func listenWrapped(addr *net.UDPAddr, keys *wrapKeyStore) (*wrapPacketListener, error) {
 	if keys == nil || keys.Count() == 0 {
 		return nil, errors.New("wrap: no active keys")
 	}
-	inner, err := pionudp.Listen("udp", addr)
+	inner, err := (&pionudp.ListenConfig{
+		// Pion otherwise allocates a virtual connection for every datagram,
+		// including unauthenticated noise. Validate the first WRAP packet before
+		// it can consume a DTLS worker and a global connection slot.
+		AcceptFilter: func(packet []byte) bool {
+			return acceptWrappedPacket(keys, packet)
+		},
+	}).Listen("udp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("wrap: udp listen: %w", err)
 	}
@@ -366,75 +390,74 @@ func (c *wrapPacketConn) Identity() (wrapIdentity, bool) {
 }
 
 func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	var buf [2048]byte
-	var n int
-	var addr net.Addr
-	var err error
+	var buf [maxWrappedPacketSize]byte
 
-	// Чтение из сокета на локальный стек-буфер без использования пулов
+	// Повреждённый пакет не должен закрывать целую DTLS-сессию. Это особенно
+	// важно после аутентификации: UDP позволяет подмешать пакет в существующий
+	// 4-tuple, а Pion передаёт ошибку ReadFrom вверх как ошибку транспорта.
 	for {
-		n, addr, err = c.inner.ReadFrom(buf[:])
+		n, addr, err := c.inner.ReadFrom(buf[:])
 		if err != nil {
 			return 0, addr, err
 		}
-		if n > 0 && (buf[0] == 0x00 || buf[0] == 0x16) {
+		if n == 0 || buf[0] == 0x00 || buf[0] == 0x16 {
 			continue
 		}
-		break
-	}
 
-	raw := buf[:n]
+		raw := buf[:n]
 
-	// Быстрый путь (Fast path) без захвата мьютекса для последующих пакетов
-	if atomic.LoadInt32(&c.selected) == 1 {
-		m, uErr := obfsUnwrapPacketAEAD(c.aead, raw, p)
-		if uErr != nil {
-			return 0, addr, fmt.Errorf("obfs unwrap: %w", uErr)
+		// Быстрый путь (Fast path) без захвата мьютекса для последующих пакетов.
+		if atomic.LoadInt32(&c.selected) == 1 {
+			m, uErr := obfsUnwrapPacketAEAD(c.aead, raw, p)
+			if uErr != nil {
+				continue
+			}
+			return m, addr, nil
 		}
-		return m, addr, nil
-	}
 
-	// Медленный путь (Slow path) с мьютексом только для первого пакета
-	c.rxMu.Lock()
-	defer c.rxMu.Unlock()
-
-	// Двойная проверка состояния под блокировкой
-	if atomic.LoadInt32(&c.selected) == 1 {
-		m, uErr := obfsUnwrapPacketAEAD(c.aead, raw, p)
-		if uErr != nil {
-			return 0, addr, fmt.Errorf("obfs unwrap: %w", uErr)
+		// Медленный путь (Slow path) с мьютексом только для выбора первого ключа.
+		c.rxMu.Lock()
+		if atomic.LoadInt32(&c.selected) == 1 {
+			m, uErr := obfsUnwrapPacketAEAD(c.aead, raw, p)
+			c.rxMu.Unlock()
+			if uErr != nil {
+				continue
+			}
+			return m, addr, nil
 		}
-		return m, addr, nil
-	}
 
-	key, identity, m, uErr := c.keys.Unwrap(raw, p)
-	if uErr != nil {
+		key, identity, m, uErr := c.keys.Unwrap(raw, p)
+		if uErr != nil {
+			c.rxMu.Unlock()
+			if atomic.CompareAndSwapInt32(&c.authLog, 0, 1) {
+				log.Printf("[WRAP] Отказ: RTP AEAD auth failed from %s (keys=%d)", addr.String(), c.keys.Count())
+			}
+			continue
+		}
+		aead, aErr := getAEAD(key)
+		if aErr != nil {
+			c.rxMu.Unlock()
+			return 0, addr, fmt.Errorf("wrap: cipher init: %w", aErr)
+		}
+		c.key = key
+		c.aead = aead
+		c.identity = identity
+		c.obfsCfg = NewObfsConfig()
+
+		if len(raw) > 1 {
+			c.obfsCfg.PayloadType = raw[1] & 0x7F
+			if c.obfsCfg.PayloadType == 96 {
+				c.obfsCfg.PaddingMax = 60
+			}
+		}
+		c.obfsWrite = NewObfsState()
+		atomic.StoreInt32(&c.selected, 1)
+		c.rxMu.Unlock()
 		if atomic.CompareAndSwapInt32(&c.authLog, 0, 1) {
-			log.Printf("[WRAP] Отказ: RTP AEAD auth failed from %s (keys=%d)", addr.String(), c.keys.Count())
+			log.Printf("[WRAP] OK: ключ выбран для %s (keys=%d), PT=%d", addr.String(), c.keys.Count(), c.obfsCfg.PayloadType)
 		}
-		return 0, addr, uErr
+		return m, addr, nil
 	}
-	aead, aErr := getAEAD(key)
-	if aErr != nil {
-		return 0, addr, fmt.Errorf("wrap: cipher init: %w", aErr)
-	}
-	c.key = key
-	c.aead = aead
-	c.identity = identity
-	c.obfsCfg = NewObfsConfig()
-
-	if len(raw) > 1 {
-		c.obfsCfg.PayloadType = raw[1] & 0x7F
-		if c.obfsCfg.PayloadType == 96 {
-			c.obfsCfg.PaddingMax = 60
-		}
-	}
-	c.obfsWrite = NewObfsState()
-	atomic.StoreInt32(&c.selected, 1)
-	if atomic.CompareAndSwapInt32(&c.authLog, 0, 1) {
-		log.Printf("[WRAP] OK: ключ выбран для %s (keys=%d), PT=%d", addr.String(), c.keys.Count(), c.obfsCfg.PayloadType)
-	}
-	return m, addr, nil
 }
 
 func (c *wrapPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
