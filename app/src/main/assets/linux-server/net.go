@@ -423,8 +423,43 @@ func ensureIptablesRule(table, chain string, insert bool, rule ...string) error 
 	return nil
 }
 
+func deleteIptablesRule(table, chain string, rule ...string) error {
+	base := []string{"-w", "5"}
+	if table != "filter" {
+		base = append(base, "-t", table)
+	}
+	for attempts := 0; attempts < 16; attempts++ {
+		checkArgs := append(append([]string{}, base...), "-C", chain)
+		checkArgs = append(checkArgs, rule...)
+		if _, err := runCmd("iptables", checkArgs...); err != nil {
+			return nil
+		}
+		deleteArgs := append(append([]string{}, base...), "-D", chain)
+		deleteArgs = append(deleteArgs, rule...)
+		out, err := runCmd("iptables", deleteArgs...)
+		if err != nil {
+			return fmt.Errorf("delete iptables %s/%s: %w: %s", table, chain, err, out)
+		}
+	}
+	return fmt.Errorf("delete iptables %s/%s: too many duplicate rules", table, chain)
+}
+
 func setupIptablesNAT(wgIface, extIface string) error {
 	comment := []string{"-m", "comment", "--comment", "WDTT_MANAGED"}
+	// Remove the broad forwarding rules written by older versions before
+	// installing the directional policy below.
+	for _, legacyRule := range [][]string{
+		{"-i", wgIface},
+		{"-o", wgIface},
+		{"-o", wgIface, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED"},
+	} {
+		legacyRule = append(legacyRule, comment...)
+		legacyRule = append(legacyRule, "-j", "ACCEPT")
+		if err := deleteIptablesRule("filter", "FORWARD", legacyRule...); err != nil {
+			return err
+		}
+	}
+
 	natRule := []string{"-s", wgServerCIDR, "-o", extIface}
 	natRule = append(natRule, comment...)
 	natRule = append(natRule, "-j", "MASQUERADE")
@@ -432,16 +467,29 @@ func setupIptablesNAT(wgIface, extIface string) error {
 		return err
 	}
 
-	fromRule := []string{"-i", wgIface}
-	fromRule = append(fromRule, comment...)
-	fromRule = append(fromRule, "-j", "ACCEPT")
-	if err := ensureIptablesRule("filter", "FORWARD", false, fromRule...); err != nil {
-		return err
+	rules := []struct {
+		rule   []string
+		target string
+	}{
+		// Rules are inserted in reverse order so the explicit peer isolation
+		// remains first even when the host FORWARD policy is ACCEPT.
+		{[]string{"-o", wgIface}, "DROP"},
+		{[]string{"-i", wgIface}, "DROP"},
+		{[]string{"-i", extIface, "-o", wgIface, "-d", wgServerCIDR, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED"}, "ACCEPT"},
+		{[]string{"-i", wgIface, "-s", wgServerCIDR, "-o", extIface}, "ACCEPT"},
+		{[]string{"-i", wgIface, "-o", wgIface}, "DROP"},
 	}
-	toRule := []string{"-o", wgIface}
-	toRule = append(toRule, comment...)
-	toRule = append(toRule, "-j", "ACCEPT")
-	return ensureIptablesRule("filter", "FORWARD", false, toRule...)
+	for _, item := range rules {
+		rule := append(item.rule, comment...)
+		rule = append(rule, "-j", item.target)
+		if err := ensureIptablesRule("filter", "FORWARD", true, rule...); err != nil {
+			return err
+		}
+	}
+	inputRule := []string{"-i", wgIface}
+	inputRule = append(inputRule, comment...)
+	inputRule = append(inputRule, "-j", "DROP")
+	return ensureIptablesRule("filter", "INPUT", true, inputRule...)
 }
 
 func runNft(args ...string) error {
@@ -462,9 +510,14 @@ func setupNftNAT(wgIface, extIface string) error {
 		{"add", "table", "inet", "wdtt"},
 		{"add", "chain", "inet", "wdtt", "postrouting", "{ type nat hook postrouting priority srcnat; policy accept; }"},
 		{"add", "rule", "inet", "wdtt", "postrouting", "ip", "saddr", wgServerCIDR, "oifname", extIface, "masquerade"},
+		{"add", "chain", "inet", "wdtt", "input", "{ type filter hook input priority filter; policy accept; }"},
+		{"add", "rule", "inet", "wdtt", "input", "iifname", wgIface, "drop"},
 		{"add", "chain", "inet", "wdtt", "forward", "{ type filter hook forward priority filter; policy accept; }"},
-		{"add", "rule", "inet", "wdtt", "forward", "iifname", wgIface, "accept"},
-		{"add", "rule", "inet", "wdtt", "forward", "oifname", wgIface, "accept"},
+		{"add", "rule", "inet", "wdtt", "forward", "iifname", wgIface, "oifname", wgIface, "drop"},
+		{"add", "rule", "inet", "wdtt", "forward", "iifname", wgIface, "ip", "saddr", wgServerCIDR, "oifname", extIface, "accept"},
+		{"add", "rule", "inet", "wdtt", "forward", "iifname", extIface, "oifname", wgIface, "ip", "daddr", wgServerCIDR, "ct", "state", "related,established", "accept"},
+		{"add", "rule", "inet", "wdtt", "forward", "iifname", wgIface, "drop"},
+		{"add", "rule", "inet", "wdtt", "forward", "oifname", wgIface, "drop"},
 	}
 	for _, command := range commands {
 		if err := runNft(command...); err != nil {
