@@ -463,13 +463,18 @@ func (s *wrapKeyStore) Unwrap(raw, dst []byte) ([]byte, wrapIdentity, int, error
 	return nil, wrapIdentity{}, 0, errors.New("wrap: auth failed")
 }
 
-func refreshWrapKeysFromDBLocked() error {
-	passwords := make([]string, 0, len(db.Passwords))
-	for password, entry := range db.Passwords {
-		if !isPasswordExpired(entry) {
+func activeGeneratedPasswords(database *Database) []string {
+	passwords := make([]string, 0, len(database.Passwords))
+	for password, entry := range database.Passwords {
+		if entry != nil && !entry.IsDeactivated && !isPasswordExpired(entry) {
 			passwords = append(passwords, password)
 		}
 	}
+	return passwords
+}
+
+func refreshWrapKeysFromDBLocked() error {
+	passwords := activeGeneratedPasswords(db)
 	return serverWrapKeys.SetPasswords(db.MainPassword, passwords)
 }
 
@@ -1416,6 +1421,7 @@ func deactivateGeneratedPassword(wgDev *device.Device, password string) (bool, e
 	}
 	entry.IsDeactivated = true
 	disablePasswordAccessState(password, false)
+	serverWrapKeys.RemovePassword(password)
 	var deviceSnapshot *ClientDevice
 	if dev := db.Devices[entry.DeviceID]; dev != nil {
 		copy := *dev
@@ -1446,7 +1452,22 @@ func reactivateGeneratedPassword(password string) (bool, error) {
 	entry.IsDeactivated = false
 	expiresAt := entry.ExpiresAt
 	dbMutex.Unlock()
+	if err := serverWrapKeys.AddPassword(password); err != nil {
+		dbMutex.Lock()
+		if current := db.Passwords[password]; current == entry {
+			current.IsDeactivated = true
+		}
+		dbMutex.Unlock()
+		return true, fmt.Errorf("restore WRAP key: %w", err)
+	}
 	if err := saveDBCritical(); err != nil {
+		dbMutex.Lock()
+		if current := db.Passwords[password]; current == entry {
+			current.IsDeactivated = true
+		}
+		dbMutex.Unlock()
+		serverWrapKeys.RemovePassword(password)
+		disablePasswordAccessState(password, false)
 		return true, err
 	}
 	setPasswordAccessState(password, false, true, expiresAt)

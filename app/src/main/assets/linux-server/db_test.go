@@ -118,6 +118,19 @@ func TestConnectionOwnershipSeparatesMainAndGeneratedDevices(t *testing.T) {
 	}
 }
 
+func TestActiveGeneratedPasswordsExcludeDeactivatedAndExpiredEntries(t *testing.T) {
+	database := &Database{Passwords: map[string]*PasswordEntry{
+		"active-password":      {},
+		"deactivated-password": {IsDeactivated: true},
+		"expired-password":     {ExpiresAt: 1},
+	}}
+
+	passwords := activeGeneratedPasswords(database)
+	if len(passwords) != 1 || passwords[0] != "active-password" {
+		t.Fatalf("activeGeneratedPasswords = %v, want [active-password]", passwords)
+	}
+}
+
 func TestInitDBRejectsCorruptDatabaseWithoutOverwritingIt(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "passwords.json")
