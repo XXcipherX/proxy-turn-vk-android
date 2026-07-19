@@ -69,6 +69,31 @@ func TestDelayedSaveRetriesAfterTransientFailure(t *testing.T) {
 	}
 }
 
+func TestCriticalSaveReportsPersistenceFailure(t *testing.T) {
+	oldPersist := persistDatabase
+	oldRetryMin := dbSaveRetryMinDelay
+	oldRetryMax := dbSaveRetryMaxDelay
+	resetDelayedSaveStateForTest()
+	dbSaveRetryMinDelay = time.Hour
+	dbSaveRetryMaxDelay = time.Hour
+	persistDatabase = func() error {
+		return errors.New("injected persistence failure")
+	}
+	t.Cleanup(func() {
+		resetDelayedSaveStateForTest()
+		persistDatabase = oldPersist
+		dbSaveRetryMinDelay = oldRetryMin
+		dbSaveRetryMaxDelay = oldRetryMax
+	})
+
+	if err := saveDBCritical(); err == nil {
+		t.Fatal("critical save reported success after a persistence failure")
+	}
+	if dbSavedRevision.Load() == dbRevision.Load() {
+		t.Fatal("failed critical save was marked as durable")
+	}
+}
+
 func validPersistentDatabaseForTest(t *testing.T) *Database {
 	t.Helper()
 	privateKey, publicKey, err := generateKeyPair()

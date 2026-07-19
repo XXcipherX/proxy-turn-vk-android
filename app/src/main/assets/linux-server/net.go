@@ -692,7 +692,6 @@ func provisionClientConfig(wgDev *device.Device, keys *wgKeys, request getConfRe
 			dbMutex.Lock()
 			if boundPassword && entry.DeviceID == request.DeviceID {
 				entry.DeviceID = ""
-				saveDBLazy()
 			}
 			dbMutex.Unlock()
 			if err == nil {
@@ -713,9 +712,6 @@ func provisionClientConfig(wgDev *device.Device, keys *wgKeys, request getConfRe
 	}
 
 	deviceSnapshot := *dev
-	if boundPassword || createdDevice {
-		saveDBLazy()
-	}
 	dbMutex.Unlock()
 
 	if err := upsertPeerInWG(wgDev, &deviceSnapshot); err != nil {
@@ -728,8 +724,13 @@ func provisionClientConfig(wgDev *device.Device, keys *wgKeys, request getConfRe
 		if boundPassword && entry.DeviceID == request.DeviceID {
 			entry.DeviceID = ""
 		}
-		saveDBLazy()
 		dbMutex.Unlock()
+		return "", "NOCONF", err
+	}
+	// GETCONF is successful only after the current device/binding state is
+	// durable. Saving even an apparently existing device also repairs a retry
+	// after an earlier synchronous persistence failure.
+	if err := saveDBCritical(); err != nil {
 		return "", "NOCONF", err
 	}
 
