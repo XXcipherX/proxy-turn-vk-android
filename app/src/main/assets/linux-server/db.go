@@ -343,6 +343,11 @@ func zeroBytes(b []byte) {
 }
 
 func (s *wrapKeyStore) SetPasswords(mainPassword string, generated []string) error {
+	for _, password := range generated {
+		if password != "" && password == mainPassword {
+			return errors.New("wrap: main password collides with a generated password")
+		}
+	}
 	next := make([]wrapKeyEntry, 0, len(generated)+1)
 	seen := make(map[string]struct{}, len(generated)+1)
 
@@ -512,6 +517,9 @@ func initDB(dir, mainPass, adminID, botToken string) error {
 	if err := validatePersistentDatabase(loaded); err != nil {
 		return fmt.Errorf("validate database %s: %w", dbFile, err)
 	}
+	if _, exists := loaded.Passwords[mainPass]; exists {
+		return fmt.Errorf("validate database %s: main password collides with a generated password", dbFile)
+	}
 	loaded.MainPassword = mainPass
 	loaded.AdminID = adminID
 	loaded.BotToken = botToken
@@ -620,6 +628,11 @@ func validatePersistentDatabase(database *Database) error {
 	if len(database.Devices) > 249 {
 		return fmt.Errorf("device count %d exceeds address pool", len(database.Devices))
 	}
+	if database.MainPassword != "" {
+		if _, exists := database.Passwords[database.MainPassword]; exists {
+			return errors.New("main password collides with a generated password")
+		}
+	}
 
 	boundDevices := make(map[string]string, len(database.Passwords))
 	for password, entry := range database.Passwords {
@@ -718,6 +731,14 @@ func saveDBCritical() error {
 	}
 	dbSaveMu.Unlock()
 	return nil
+}
+
+func generatedPasswordAvailable(database *Database, candidate string) bool {
+	if database == nil || candidate == "" || candidate == database.MainPassword {
+		return false
+	}
+	_, exists := database.Passwords[candidate]
+	return !exists
 }
 
 func scheduleDBSaveLocked(delay time.Duration) {
@@ -1302,7 +1323,7 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 						generateErr = err
 						break
 					}
-					if _, exists := db.Passwords[candidate]; !exists {
+					if generatedPasswordAvailable(db, candidate) {
 						newPass = candidate
 						break
 					}

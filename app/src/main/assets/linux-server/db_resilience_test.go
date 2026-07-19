@@ -169,6 +169,12 @@ func TestValidatePersistentDatabaseRejectsSemanticCorruption(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "main password collision",
+			mutate: func(database *Database) {
+				database.MainPassword = "Generated-Test_7kM9"
+			},
+		},
 	}
 
 	for _, test := range tests {

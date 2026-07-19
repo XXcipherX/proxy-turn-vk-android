@@ -131,6 +131,46 @@ func TestActiveGeneratedPasswordsExcludeDeactivatedAndExpiredEntries(t *testing.
 	}
 }
 
+func TestGeneratedPasswordAvailabilityRejectsMainPassword(t *testing.T) {
+	database := &Database{
+		MainPassword: "Strong-Test_7kM9xQ2",
+		Passwords: map[string]*PasswordEntry{
+			"existing-generated": {},
+		},
+	}
+	if generatedPasswordAvailable(database, database.MainPassword) {
+		t.Fatal("main password was available for a generated credential")
+	}
+	if generatedPasswordAvailable(database, "existing-generated") {
+		t.Fatal("existing generated password was reported as available")
+	}
+	if !generatedPasswordAvailable(database, "new-generated") {
+		t.Fatal("unique generated password was rejected")
+	}
+}
+
+func TestInitDBRejectsNewMainPasswordMatchingGeneratedPassword(t *testing.T) {
+	dir := t.TempDir()
+	mainPassword := "Strong-Test_7kM9xQ2"
+	database := &Database{
+		Passwords: map[string]*PasswordEntry{
+			mainPassword: {},
+		},
+		Devices: make(map[string]*ClientDevice),
+	}
+	data, err := json.Marshal(database)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	path := filepath.Join(dir, "passwords.json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := initDB(dir, mainPassword, "", ""); err == nil {
+		t.Fatal("initDB accepted a main password used by a generated entry")
+	}
+}
+
 func TestInitDBRejectsCorruptDatabaseWithoutOverwritingIt(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "passwords.json")
