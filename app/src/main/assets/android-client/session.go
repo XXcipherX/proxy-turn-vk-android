@@ -262,11 +262,10 @@ func RunSession(
 	}
 
 	dtlsCfg := &dtls.Config{
-		Certificates:          []tls.Certificate{cert},
-		InsecureSkipVerify:    true,
-		ExtendedMasterSecret:  dtls.RequireExtendedMasterSecret,
-		CipherSuites:          []dtls.CipherSuiteID{dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
-		ConnectionIDGenerator: dtls.OnlySendCIDGenerator(),
+		Certificates:         []tls.Certificate{cert},
+		InsecureSkipVerify:   true,
+		ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
+		CipherSuites:         []dtls.CipherSuiteID{dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
 	}
 
 	dtlsConn, err := dtls.Client(pipeB, peer, dtlsCfg)

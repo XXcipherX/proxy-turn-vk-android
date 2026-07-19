@@ -41,7 +41,21 @@ start_server() {
     --privileged \
     -p 127.0.0.1:56000:56000/udp \
     -v "$STATE_DIR:/etc/wdtt" \
+    --entrypoint /bin/sh \
     "$IMAGE" \
+    -ec '
+      wan="$(ip -4 route show default | grep -o "dev [^ ]*" | head -n1 | cut -d" " -f2)"
+      comment=WDTT_DOCKER
+      subnet=10.66.66.0/24
+      iptables -w -I INPUT 1 -i wdtt0 -m comment --comment "$comment" -j DROP
+      iptables -w -I FORWARD 1 -i wdtt0 -o wdtt0 -m comment --comment "$comment" -j DROP
+      iptables -w -I FORWARD 1 -i wdtt0 -s "$subnet" -o "$wan" -m comment --comment "$comment" -j ACCEPT
+      iptables -w -I FORWARD 1 -i "$wan" -o wdtt0 -d "$subnet" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$comment" -j ACCEPT
+      iptables -w -I FORWARD 1 -i wdtt0 -m comment --comment "$comment" -j DROP
+      iptables -w -I FORWARD 1 -o wdtt0 -m comment --comment "$comment" -j DROP
+      iptables -w -t nat -A POSTROUTING -s "$subnet" -o "$wan" -m comment --comment "$comment" -j MASQUERADE
+      exec /usr/local/bin/wdtt-server "$@"
+    ' wdtt-server \
     -listen=0.0.0.0:56000 \
     -wg-port=56001 \
     -config-dir=/etc/wdtt \
@@ -92,6 +106,7 @@ docker exec "$CONTAINER" sh -exc '
   iptables -w -C FORWARD -o wdtt0 -m comment --comment WDTT_MANAGED -j DROP
   ! iptables -w -C FORWARD -i wdtt0 -m comment --comment WDTT_MANAGED -j ACCEPT
   ! iptables -w -C FORWARD -o wdtt0 -m comment --comment WDTT_MANAGED -j ACCEPT
+  ! iptables-save | grep -Fq WDTT_DOCKER
   [ "$(stat -c %a /etc/wdtt)" = "700" ]
   [ "$(stat -c %a /etc/wdtt/passwords.json)" = "600" ]
   [ "$(stat -c %a /etc/wdtt/wg-keys.dat)" = "600" ]
@@ -110,6 +125,19 @@ docker exec "$CONTAINER" sh -exc '
   WDTT_SMOKE_ADDR=127.0.0.1:56000 \
   WDTT_SMOKE_PASSWORD="$PASSWORD" \
     go test -mod=readonly -count=1 -run '^TestRunningServerProtocol$' -timeout=45s -v .
+)
+
+docker_gateway="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' "$CONTAINER")"
+if ! printf '%s\n' "$docker_gateway" | grep -Eq '^[0-9]+([.][0-9]+){3}$'; then
+  echo "Could not determine the container IPv4 gateway" >&2
+  exit 1
+fi
+(
+  cd "$SERVER_DIR"
+  WDTT_SMOKE_ADDR=127.0.0.1:56000 \
+  WDTT_SMOKE_PASSWORD="$PASSWORD" \
+  WDTT_SMOKE_HTTP_TARGET="$docker_gateway" \
+    go test -mod=readonly -count=1 -run '^TestRunningServerWireGuardDataPlane$' -timeout=90s -v .
 )
 
 keys_before="$(docker exec "$CONTAINER" sha256sum /etc/wdtt/wg-keys.dat | awk '{print $1}')"
@@ -174,6 +202,8 @@ exercise_shutdown_phase() {
 }
 
 sudo grep -Fq 'ci-smoke-device-0001' "$STATE_DIR/passwords.json"
+sudo grep -Fq 'ci-e2e-device-0001' "$STATE_DIR/passwords.json"
+sudo grep -Fq 'ci-e2e-device-0002' "$STATE_DIR/passwords.json"
 docker rm "$CONTAINER" >/dev/null
 
 start_server
@@ -182,7 +212,7 @@ if [ "$keys_before" != "$keys_after" ]; then
   echo "WireGuard keys changed after restart" >&2
   exit 1
 fi
-docker logs "$CONTAINER" 2>&1 | grep -F '[WG] Восстановлено сохранённых устройств: 1' >/dev/null
+docker logs "$CONTAINER" 2>&1 | grep -F '[WG] Восстановлено сохранённых устройств: 3' >/dev/null
 
 (
   cd "$SERVER_DIR"

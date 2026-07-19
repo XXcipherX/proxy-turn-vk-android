@@ -329,23 +329,15 @@ func setupFullConeNAT(wgIface string) error {
 	}
 	log.Printf("[NAT] Внешний: %s", extIface)
 
-	switch {
-	case commandExists("iptables"):
-		if err := setupIptablesNAT(wgIface, extIface); err != nil {
-			natType = "ОШИБКА: iptables"
-			return err
-		}
-		natType = "MASQUERADE iptables ✅"
-	case commandExists("nft"):
-		if err := setupNftNAT(wgIface, extIface); err != nil {
-			natType = "ОШИБКА: nftables"
-			return err
-		}
-		natType = "MASQUERADE nft ✅"
-	default:
-		natType = "NAT не настроен: нет iptables/nft"
+	if !commandExists("iptables") {
+		natType = "NAT не настроен: нет iptables"
 		return errors.New(natType)
 	}
+	if err := setupIptablesNAT(wgIface, extIface); err != nil {
+		natType = "ОШИБКА: iptables"
+		return err
+	}
+	natType = "MASQUERADE iptables ✅"
 
 	log.Printf("[NAT] Режим: %s", natType)
 	log.Println("[NAT] ══════════════════════════════════════")
@@ -423,6 +415,33 @@ func deleteIptablesRule(table, chain string, rule ...string) error {
 
 func setupIptablesNAT(wgIface, extIface string) error {
 	comment := []string{"-m", "comment", "--comment", "WDTT_MANAGED"}
+	// The server owns tunnel INPUT/FORWARD/NAT policy. Older installer
+	// entrypoints installed the same data-plane rules before exec; remove those
+	// duplicates while leaving public-port ingress and TCPMSS to the installer.
+	installerRules := []struct {
+		table  string
+		chain  string
+		rule   []string
+		target string
+	}{
+		{"filter", "INPUT", []string{"-i", wgIface}, "DROP"},
+		{"filter", "FORWARD", []string{"-i", wgIface, "-o", wgIface}, "DROP"},
+		{"filter", "FORWARD", []string{"-i", wgIface, "-s", wgServerCIDR, "-o", extIface}, "ACCEPT"},
+		{"filter", "FORWARD", []string{"-i", extIface, "-o", wgIface, "-d", wgServerCIDR, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED"}, "ACCEPT"},
+		{"filter", "FORWARD", []string{"-i", wgIface}, "DROP"},
+		{"filter", "FORWARD", []string{"-o", wgIface}, "DROP"},
+		{"nat", "POSTROUTING", []string{"-s", wgServerCIDR, "-o", extIface}, "MASQUERADE"},
+	}
+	for _, installerOwner := range []string{"WDTT_DOCKER", "WDTT_SETUP"} {
+		installerComment := []string{"-m", "comment", "--comment", installerOwner}
+		for _, item := range installerRules {
+			rule := append(append([]string{}, item.rule...), installerComment...)
+			rule = append(rule, "-j", item.target)
+			if err := deleteIptablesRule(item.table, item.chain, rule...); err != nil {
+				return err
+			}
+		}
+	}
 	// Remove the broad forwarding rules written by older versions before
 	// installing the directional policy below.
 	for _, legacyRule := range [][]string{
@@ -467,41 +486,6 @@ func setupIptablesNAT(wgIface, extIface string) error {
 	inputRule = append(inputRule, comment...)
 	inputRule = append(inputRule, "-j", "DROP")
 	return ensureIptablesRule("filter", "INPUT", true, inputRule...)
-}
-
-func runNft(args ...string) error {
-	out, err := runCmd("nft", args...)
-	if err != nil {
-		return fmt.Errorf("nft %s: %w: %s", strings.Join(args, " "), err, out)
-	}
-	return nil
-}
-
-func setupNftNAT(wgIface, extIface string) error {
-	if _, err := runCmd("nft", "list", "table", "inet", "wdtt"); err == nil {
-		if err := runNft("delete", "table", "inet", "wdtt"); err != nil {
-			return err
-		}
-	}
-	commands := [][]string{
-		{"add", "table", "inet", "wdtt"},
-		{"add", "chain", "inet", "wdtt", "postrouting", "{ type nat hook postrouting priority srcnat; policy accept; }"},
-		{"add", "rule", "inet", "wdtt", "postrouting", "ip", "saddr", wgServerCIDR, "oifname", extIface, "masquerade"},
-		{"add", "chain", "inet", "wdtt", "input", "{ type filter hook input priority filter; policy accept; }"},
-		{"add", "rule", "inet", "wdtt", "input", "iifname", wgIface, "drop"},
-		{"add", "chain", "inet", "wdtt", "forward", "{ type filter hook forward priority filter; policy accept; }"},
-		{"add", "rule", "inet", "wdtt", "forward", "iifname", wgIface, "oifname", wgIface, "drop"},
-		{"add", "rule", "inet", "wdtt", "forward", "iifname", wgIface, "ip", "saddr", wgServerCIDR, "oifname", extIface, "accept"},
-		{"add", "rule", "inet", "wdtt", "forward", "iifname", extIface, "oifname", wgIface, "ip", "daddr", wgServerCIDR, "ct", "state", "related,established", "accept"},
-		{"add", "rule", "inet", "wdtt", "forward", "iifname", wgIface, "drop"},
-		{"add", "rule", "inet", "wdtt", "forward", "oifname", wgIface, "drop"},
-	}
-	for _, command := range commands {
-		if err := runNft(command...); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func startUserspaceWG(keys *wgKeys, wgPort int) (*device.Device, error) {

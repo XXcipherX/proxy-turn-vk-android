@@ -213,7 +213,7 @@ jobs:
           cache-dependency-path: ${{ env.SERVER_DIR }}/go.sum
 
   docker-smoke:
-    name: Docker runtime and protocol smoke
+    name: Docker WireGuard data-plane smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
