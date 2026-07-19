@@ -51,8 +51,9 @@ func validateDNSServers(value string) error {
 	}
 	for _, rawServer := range strings.Split(value, ",") {
 		server := strings.TrimSpace(rawServer)
-		if server == "" || net.ParseIP(server) == nil {
-			return fmt.Errorf("invalid DNS server %q", rawServer)
+		parsed := net.ParseIP(server)
+		if server == "" || parsed == nil || parsed.To4() == nil {
+			return fmt.Errorf("DNS server %q must be an IPv4 address", rawServer)
 		}
 	}
 	return nil

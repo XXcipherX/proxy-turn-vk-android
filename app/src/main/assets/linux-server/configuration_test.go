@@ -17,7 +17,7 @@ func TestServerConfigurationValidation(t *testing.T) {
 		t.Fatalf("valid listen address = %v, %v", address, err)
 	}
 
-	for _, servers := range []string{"", "1.1.1.1,", "not-an-ip", "1.1.1.1,not-an-ip"} {
+	for _, servers := range []string{"", "1.1.1.1,", "not-an-ip", "1.1.1.1,not-an-ip", "2606:4700:4700::1111", "1.1.1.1,2001:4860:4860::8888"} {
 		if err := validateDNSServers(servers); err == nil {
 			t.Fatalf("validateDNSServers(%q) succeeded", servers)
 		}
