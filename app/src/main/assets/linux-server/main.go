@@ -136,6 +136,7 @@ func main() {
 		log.Fatalf("[DTLS] создание сертификата: %v", err)
 	}
 	connectionLimit := newConnectionLimiter(*maxConnections, *handshakeRate)
+	identityLimit := newIdentityConnectionLimiter(*maxConnections)
 
 	if v := strings.TrimSpace(*dnsFlag); v != "" {
 		dns = v
@@ -217,6 +218,7 @@ func main() {
 	log.Printf("   DTLS: %s | WG: %s | NAT: %s", *listen, wgEndpoint, natType)
 	log.Printf("   WRAP: password HKDF + RTP AEAD | keys: %d", serverWrapKeys.Count())
 	log.Printf("   LIMITS: connections=%d | handshakes=%d/s", *maxConnections, *handshakeRate)
+	log.Printf("   TEMP LIMITS: total=%d | per-password=%d | per-IP=%d", identityLimit.maxGeneratedTotal, identityLimit.maxPerPassword, identityLimit.maxPerSourceIP)
 	log.Println("[SERVER] Готов")
 
 	for {
@@ -243,7 +245,7 @@ func main() {
 			defer workers.Done()
 			defer connectionLimit.Release()
 			defer c.Close()
-			handleConn(ctx, c, wrapListener, wgEndpoint, wgDev, keys)
+			handleConn(ctx, c, wrapListener, identityLimit, wgEndpoint, wgDev, keys)
 		}(dtlsConn)
 	}
 }

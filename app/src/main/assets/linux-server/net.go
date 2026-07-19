@@ -739,7 +739,7 @@ func provisionClientConfig(wgDev *device.Device, keys *wgKeys, request getConfRe
 	return buildClientConfig(keys.serverPublic, deviceSnapshot.PrivKey, deviceSnapshot.IP, request.ClientPort), "", nil
 }
 
-func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacketListener, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
+func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacketListener, identityLimit *identityConnectionLimiter, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
 	// Добавлен defer для предотвращения утечки сокетов при ошибках на любом этапе функции
 	defer clientConn.Close()
 	stopShutdownDeadline := context.AfterFunc(ctx, func() {
@@ -775,6 +775,12 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 		log.Printf("[WRAP] Отказ: неактивный ключ %s для %s", maskPassword(connPassword), clientConn.RemoteAddr())
 		return
 	}
+	if !identityLimit.TryAcquire(identity, clientConn.RemoteAddr()) {
+		atomic.AddInt64(&rejectedConns, 1)
+		log.Printf("[LIMIT] Отказ: исчерпана квота ключа/IP для %s", clientConn.RemoteAddr())
+		return
+	}
+	defer identityLimit.Release(identity, clientConn.RemoteAddr())
 
 	atomic.AddInt32(&activeConns, 1)
 	defer atomic.AddInt32(&activeConns, -1)
@@ -821,7 +827,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 			return
 		}
 
-		clientConn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+		clientConn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		n, err = clientConn.Read(buf)
 		if err != nil {
 			return
@@ -833,7 +839,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 
 	if firstStr == "READY" {
 		clientConn.Write([]byte("READY_OK"))
-		clientConn.SetReadDeadline(time.Now().Add(10 * time.Minute))
+		clientConn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		n, err = clientConn.Read(buf)
 		if err != nil {
 			return

@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"io"
 	"net"
 	"sync"
@@ -246,7 +247,14 @@ func TestAcceptWrappedPacketAuthenticatesBeforeAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getAEAD: %v", err)
 	}
-	payload := []byte("DTLS client hello fixture")
+	payload := make([]byte, 13+12+38)
+	payload[0] = 22
+	payload[1] = 0xfe
+	payload[2] = 0xfd
+	binary.BigEndian.PutUint16(payload[11:13], uint16(len(payload)-13))
+	payload[13] = 1
+	payload[16] = 38
+	payload[24] = 38
 	wire := make([]byte, obfsWrapWireLen(len(payload), NewObfsConfig()))
 	n, err := obfsWrapPacketInto(wire, aead, payload, NewObfsConfig(), NewObfsState())
 	if err != nil {
@@ -256,11 +264,20 @@ func TestAcceptWrappedPacketAuthenticatesBeforeAdmission(t *testing.T) {
 		t.Fatal("authenticated WRAP packet was rejected")
 	}
 
+	nonClientHello := append([]byte(nil), payload...)
+	nonClientHello[13] = 2
+	nonHelloWire := make([]byte, obfsWrapWireLen(len(nonClientHello), NewObfsConfig()))
+	nonHelloN, err := obfsWrapPacketInto(nonHelloWire, aead, nonClientHello, NewObfsConfig(), NewObfsState())
+	if err != nil {
+		t.Fatalf("wrap non-ClientHello packet: %v", err)
+	}
+
 	badRTP := append([]byte(nil), wire[:n]...)
 	badRTP[len(badRTP)-1] ^= 0xff
 	for name, packet := range map[string][]byte{
 		"raw DTLS":      {0x16, 0xfe, 0xfd, 0x00},
 		"forged RTP":    badRTP,
+		"non ClientHello": nonHelloWire[:nonHelloN],
 		"empty packet":  {},
 		"oversized RTP": append([]byte{0x80, 0x6f}, make([]byte, maxWrappedPacketSize)...),
 	} {
@@ -269,6 +286,11 @@ func TestAcceptWrappedPacketAuthenticatesBeforeAdmission(t *testing.T) {
 				t.Fatal("unauthenticated datagram passed the admission filter")
 			}
 		})
+	}
+
+	replayCache := newWrapReplayCache()
+	if !acceptWrappedPacketOnce(keys, replayCache, wire[:n]) || acceptWrappedPacketOnce(keys, replayCache, wire[:n]) {
+		t.Fatal("first WRAP packet replay was not rejected")
 	}
 }
 

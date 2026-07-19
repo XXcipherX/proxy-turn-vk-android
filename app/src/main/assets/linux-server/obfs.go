@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -24,6 +25,8 @@ const (
 	maxWrappedPacketSize = 2048
 	wrappedSocketBuffer  = 4 * 1024 * 1024
 	wrappedListenBacklog = 512
+	wrapReplayCacheSize  = 4096
+	wrapReplayTTL        = 30 * time.Second
 )
 
 var (
@@ -281,6 +284,66 @@ func obfsIsRTPPacket(wire []byte) bool {
 	return pt == 111 || pt == 96
 }
 
+func readUint24(value []byte) int {
+	return int(value[0])<<16 | int(value[1])<<8 | int(value[2])
+}
+
+func isDTLSClientHello(packet []byte) bool {
+	const (
+		dtlsRecordHeader    = 13
+		dtlsHandshakeHeader = 12
+		clientHelloType     = 1
+		minClientHelloBody  = 38
+	)
+	if len(packet) < dtlsRecordHeader+dtlsHandshakeHeader || packet[0] != 22 || packet[1] != 0xfe || (packet[2] != 0xfd && packet[2] != 0xff) {
+		return false
+	}
+	recordLength := int(binary.BigEndian.Uint16(packet[11:13]))
+	if recordLength < dtlsHandshakeHeader || dtlsRecordHeader+recordLength > len(packet) || packet[13] != clientHelloType {
+		return false
+	}
+	handshakeLength := readUint24(packet[14:17])
+	fragmentOffset := readUint24(packet[19:22])
+	fragmentLength := readUint24(packet[22:25])
+	return handshakeLength >= minClientHelloBody && fragmentOffset == 0 && fragmentLength > 0 &&
+		fragmentLength <= handshakeLength && dtlsHandshakeHeader+fragmentLength <= recordLength
+}
+
+type wrapReplayCache struct {
+	mu      sync.Mutex
+	entries map[[sha256.Size]byte]time.Time
+}
+
+func newWrapReplayCache() *wrapReplayCache {
+	return &wrapReplayCache{entries: make(map[[sha256.Size]byte]time.Time)}
+}
+
+func (c *wrapReplayCache) Admit(packet []byte, now time.Time) bool {
+	digest := sha256.Sum256(packet)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if expiresAt, exists := c.entries[digest]; exists && now.Before(expiresAt) {
+		return false
+	}
+	var oldestDigest [sha256.Size]byte
+	var oldestTime time.Time
+	for candidate, expiresAt := range c.entries {
+		if !now.Before(expiresAt) {
+			delete(c.entries, candidate)
+			continue
+		}
+		if oldestTime.IsZero() || expiresAt.Before(oldestTime) {
+			oldestDigest = candidate
+			oldestTime = expiresAt
+		}
+	}
+	if len(c.entries) >= wrapReplayCacheSize {
+		delete(c.entries, oldestDigest)
+	}
+	c.entries[digest] = now.Add(wrapReplayTTL)
+	return true
+}
+
 func acceptWrappedPacket(keys *wrapKeyStore, raw []byte) bool {
 	if keys == nil || len(raw) == 0 || len(raw) > maxWrappedPacketSize || !obfsIsRTPPacket(raw) {
 		return false
@@ -291,22 +354,28 @@ func acceptWrappedPacket(keys *wrapKeyStore, raw []byte) bool {
 	if len(key) > 0 {
 		zeroBytes(key)
 	}
+	valid := err == nil && isDTLSClientHello(plaintext[:n])
 	if n > 0 {
 		zeroBytes(plaintext[:n])
 	}
-	return err == nil
+	return valid
+}
+
+func acceptWrappedPacketOnce(keys *wrapKeyStore, replayCache *wrapReplayCache, raw []byte) bool {
+	return acceptWrappedPacket(keys, raw) && replayCache.Admit(raw, time.Now())
 }
 
 func listenWrapped(addr *net.UDPAddr, keys *wrapKeyStore) (*wrapPacketListener, error) {
 	if keys == nil || keys.Count() == 0 {
 		return nil, errors.New("wrap: no active keys")
 	}
+	replayCache := newWrapReplayCache()
 	inner, err := (&pionudp.ListenConfig{
 		// Pion otherwise allocates a virtual connection for every datagram,
 		// including unauthenticated noise. Validate the first WRAP packet before
 		// it can consume a DTLS worker and a global connection slot.
 		AcceptFilter: func(packet []byte) bool {
-			return acceptWrappedPacket(keys, packet)
+			return acceptWrappedPacketOnce(keys, replayCache, packet)
 		},
 		Backlog:         wrappedListenBacklog,
 		ReadBufferSize:  wrappedSocketBuffer,
