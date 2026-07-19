@@ -90,6 +90,34 @@ func TestMainDeviceCallbacksExcludeGeneratedPasswordDevices(t *testing.T) {
 	}
 }
 
+func TestConnectionOwnershipSeparatesMainAndGeneratedDevices(t *testing.T) {
+	database := &Database{
+		Passwords: map[string]*PasswordEntry{
+			"generated-secret": {DeviceID: "generated-device"},
+		},
+		Devices: map[string]*ClientDevice{
+			"main-device":      {DeviceID: "main-device"},
+			"generated-device": {DeviceID: "generated-device"},
+		},
+	}
+
+	if !connectionOwnsDevice(database, "main-device", "main-secret", true) {
+		t.Fatal("main password did not own its unbound device")
+	}
+	if connectionOwnsDevice(database, "generated-device", "main-secret", true) {
+		t.Fatal("main password was allowed to reuse a generated-password device")
+	}
+	if !connectionOwnsDevice(database, "generated-device", "generated-secret", false) {
+		t.Fatal("generated password did not own its bound device")
+	}
+	if connectionOwnsDevice(database, "main-device", "generated-secret", false) {
+		t.Fatal("generated password was allowed to claim a main-password device")
+	}
+	if connectionOwnsDevice(database, "generated-device", "another-secret", false) {
+		t.Fatal("generated password was allowed to reuse another password's device")
+	}
+}
+
 func TestInitDBRejectsCorruptDatabaseWithoutOverwritingIt(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "passwords.json")

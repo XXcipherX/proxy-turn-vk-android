@@ -298,6 +298,26 @@ func mainDeviceIDs(database *Database) []string {
 	return ids
 }
 
+func generatedPasswordForDevice(database *Database, deviceID string) (string, bool) {
+	if database == nil || deviceID == "" {
+		return "", false
+	}
+	for password, entry := range database.Passwords {
+		if entry != nil && entry.DeviceID == deviceID {
+			return password, true
+		}
+	}
+	return "", false
+}
+
+func connectionOwnsDevice(database *Database, deviceID, password string, isMainPassword bool) bool {
+	generatedOwner, ownedByGeneratedPassword := generatedPasswordForDevice(database, deviceID)
+	if isMainPassword {
+		return !ownedByGeneratedPassword
+	}
+	return ownedByGeneratedPassword && generatedOwner == password
+}
+
 func findMainDeviceByCallbackToken(database *Database, token string) (string, *ClientDevice, bool) {
 	var foundID string
 	var foundDevice *ClientDevice

@@ -666,13 +666,16 @@ func provisionClientConfig(wgDev *device.Device, keys *wgKeys, request getConfRe
 		dbMutex.Unlock()
 		return "", "DENIED:device_mismatch", nil
 	}
-	if isGeneratedPassword {
-		for otherPassword, otherEntry := range db.Passwords {
-			if otherPassword != connPassword && otherEntry != nil && otherEntry.DeviceID == request.DeviceID {
-				dbMutex.Unlock()
-				return "", "DENIED:device_mismatch", nil
-			}
-		}
+	generatedOwner, ownedByGeneratedPassword := generatedPasswordForDevice(db, request.DeviceID)
+	if ownedByGeneratedPassword && (!isGeneratedPassword || generatedOwner != connPassword) {
+		dbMutex.Unlock()
+		return "", "DENIED:device_mismatch", nil
+	}
+
+	dev, exists := db.Devices[request.DeviceID]
+	if exists && !connectionOwnsDevice(db, request.DeviceID, connPassword, isMainPass) {
+		dbMutex.Unlock()
+		return "", "DENIED:device_mismatch", nil
 	}
 
 	boundPassword := false
@@ -681,7 +684,6 @@ func provisionClientConfig(wgDev *device.Device, keys *wgKeys, request getConfRe
 		boundPassword = true
 	}
 
-	dev, exists := db.Devices[request.DeviceID]
 	createdDevice := false
 	if !exists {
 		clientIP := getNextIP()
