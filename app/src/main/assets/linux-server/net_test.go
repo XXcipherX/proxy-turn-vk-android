@@ -4,8 +4,28 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
+
+func TestAddTrafficIsImmediatelyVisible(t *testing.T) {
+	var total int64
+	var passwordTotal int64
+	addTraffic(&total, &passwordTotal, 512, true)
+	if got := atomic.LoadInt64(&total); got != 512 {
+		t.Fatalf("total traffic = %d, want 512", got)
+	}
+	if got := atomic.LoadInt64(&passwordTotal); got != 512 {
+		t.Fatalf("password traffic = %d, want 512", got)
+	}
+	addTraffic(&total, &passwordTotal, 256, false)
+	if got := atomic.LoadInt64(&total); got != 768 {
+		t.Fatalf("total traffic = %d, want 768", got)
+	}
+	if got := atomic.LoadInt64(&passwordTotal); got != 512 {
+		t.Fatalf("untracked password traffic = %d, want 512", got)
+	}
+}
 
 func TestDefaultInterfaceFromRoutes(t *testing.T) {
 	routes := "default via 192.0.2.1 dev ens3 proto dhcp src 192.0.2.10\n192.0.2.0/24 dev ens3"

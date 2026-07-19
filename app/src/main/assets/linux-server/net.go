@@ -739,6 +739,16 @@ func provisionClientConfig(wgDev *device.Device, keys *wgKeys, request getConfRe
 	return buildClientConfig(keys.serverPublic, deviceSnapshot.PrivKey, deviceSnapshot.IP, request.ClientPort), "", nil
 }
 
+func addTraffic(total, passwordTotal *int64, bytes int, trackPassword bool) {
+	if bytes <= 0 {
+		return
+	}
+	atomic.AddInt64(total, int64(bytes))
+	if trackPassword {
+		atomic.AddInt64(passwordTotal, int64(bytes))
+	}
+}
+
 func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacketListener, identityLimit *identityConnectionLimiter, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
 	// Добавлен defer для предотвращения утечки сокетов при ошибках на любом этапе функции
 	defer clientConn.Close()
@@ -869,10 +879,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 	if _, err := wgConn.Write(firstPacket); err != nil {
 		return
 	}
-	atomic.AddInt64(&totalBytesFromClient, int64(len(firstPacket)))
-	if !connIsMainPass {
-		atomic.AddInt64(&localUpBytes, int64(len(firstPacket)))
-	}
+	addTraffic(&totalBytesFromClient, &localUpBytes, len(firstPacket), !connIsMainPass)
 
 	pctx, pcancel := context.WithCancel(ctx)
 	defer pcancel()
@@ -936,63 +943,32 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 		defer putBuf(b)
 
 		var lastDeadlineUpdate time.Time
-		var localFromClient int64
-		var localPassUp int64
-
-		// Гарантированный сброс накопленных данных при выходе из горутины
-		defer func() {
-			if localFromClient > 0 {
-				atomic.AddInt64(&totalBytesFromClient, localFromClient)
-			}
-			if localPassUp > 0 {
-				atomic.AddInt64(&localUpBytes, localPassUp)
-			}
-		}()
-
-		tick := time.NewTicker(5 * time.Second)
-		defer tick.Stop()
-
 		for {
-			select {
-			case <-pctx.Done():
+			if pctx.Err() != nil {
 				return
-			case <-tick.C:
-				if localFromClient > 0 {
-					atomic.AddInt64(&totalBytesFromClient, localFromClient)
-					localFromClient = 0
-				}
-				if localPassUp > 0 {
-					atomic.AddInt64(&localUpBytes, localPassUp)
-					localPassUp = 0
-				}
-			default:
-				// Вызываем дедлайн только раз в 15 секунд, а не на каждый пакет
-				now := time.Now()
-				if now.Sub(lastDeadlineUpdate) > 15*time.Second {
-					clientConn.SetReadDeadline(now.Add(30 * time.Minute))
-					lastDeadlineUpdate = now
-				}
+			}
+			// Вызываем дедлайн только раз в 15 секунд, а не на каждый пакет
+			now := time.Now()
+			if now.Sub(lastDeadlineUpdate) > 15*time.Second {
+				clientConn.SetReadDeadline(now.Add(30 * time.Minute))
+				lastDeadlineUpdate = now
+			}
 
-				nn, err := clientConn.Read(*b)
-				if err != nil {
-					return
-				}
+			nn, err := clientConn.Read(*b)
+			if err != nil {
+				return
+			}
 
-				if nn == 1 && (*b)[0] == 0xFF {
-					continue
-				}
-				if !passwordActive() {
-					return
-				}
+			if nn == 1 && (*b)[0] == 0xFF {
+				continue
+			}
+			if !passwordActive() {
+				return
+			}
 
-				localFromClient += int64(nn)
-				if !connIsMainPass {
-					localPassUp += int64(nn)
-				}
-
-				if _, err := wgConn.Write((*b)[:nn]); err != nil {
-					return
-				}
+			addTraffic(&totalBytesFromClient, &localUpBytes, nn, !connIsMainPass)
+			if _, err := wgConn.Write((*b)[:nn]); err != nil {
+				return
 			}
 		}
 	}()
@@ -1005,65 +981,31 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 		defer putBuf(b)
 
 		var lastDeadlineUpdate time.Time
-		var localToClient int64
-		var localPassDown int64
-
-		// Гарантированный сброс накопленных данных при выходе из горутины
-		defer func() {
-			if localToClient > 0 {
-				atomic.AddInt64(&totalBytesToClient, localToClient)
-			}
-			if localPassDown > 0 {
-				atomic.AddInt64(&localDownBytes, localPassDown)
-			}
-		}()
-
-		tick := time.NewTicker(5 * time.Second)
-		defer tick.Stop()
-
 		for {
-			select {
-			case <-pctx.Done():
+			if pctx.Err() != nil {
 				return
-			case <-tick.C:
-				if localToClient > 0 {
-					atomic.AddInt64(&totalBytesToClient, localToClient)
-					localToClient = 0
-				}
-				if localPassDown > 0 {
-					atomic.AddInt64(&localDownBytes, localPassDown)
-					localPassDown = 0
-				}
-			default:
-				// Вызываем дедлайн только раз в 15 секунд
-				now := time.Now()
-				if now.Sub(lastDeadlineUpdate) > 15*time.Second {
-					wgConn.SetReadDeadline(now.Add(30 * time.Minute))
-					lastDeadlineUpdate = now
-				}
+			}
+			// Вызываем дедлайн только раз в 15 секунд
+			now := time.Now()
+			if now.Sub(lastDeadlineUpdate) > 15*time.Second {
+				wgConn.SetReadDeadline(now.Add(30 * time.Minute))
+				lastDeadlineUpdate = now
+			}
 
-				nn, err := wgConn.Read(*b)
-				if err != nil {
-					if isNetTimeout(err) {
-						if pctx.Err() != nil {
-							return
-						}
-						continue
-					}
-					return
+			nn, err := wgConn.Read(*b)
+			if err != nil {
+				if isNetTimeout(err) && pctx.Err() == nil {
+					continue
 				}
-				if !passwordActive() {
-					return
-				}
+				return
+			}
+			if !passwordActive() {
+				return
+			}
 
-				localToClient += int64(nn)
-				if !connIsMainPass {
-					localPassDown += int64(nn)
-				}
-
-				if _, err := clientConn.Write((*b)[:nn]); err != nil {
-					return
-				}
+			addTraffic(&totalBytesToClient, &localDownBytes, nn, !connIsMainPass)
+			if _, err := clientConn.Write((*b)[:nn]); err != nil {
+				return
 			}
 		}
 	}()
