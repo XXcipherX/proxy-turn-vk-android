@@ -9,7 +9,16 @@ fun stripVkUrlStatic(input: String): String {
         "https://m.vk.com/call/join/",
         "http://m.vk.com/call/join/",
         "m.vk.com/call/join/",
-        "vk.com/call/join/"
+        "vk.com/call/join/",
+        "https://vk.ru/call/join/",
+        "http://vk.ru/call/join/",
+        "https://m.vk.ru/call/join/",
+        "http://m.vk.ru/call/join/",
+        "m.vk.ru/call/join/",
+        "vk.ru/call/join/",
+        "https://vk.me/join/",
+        "http://vk.me/join/",
+        "vk.me/join/"
     )
     for (prefix in prefixes) {
         if (lower.startsWith(prefix)) {

@@ -135,13 +135,14 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 	deviceID := uuid.New().String()
 	name := generateName()
 	profile := vkCallsProfile
-	linkURL := neturl.QueryEscape("https://vk.com/call/join/" + link)
+	linkURL := neturl.QueryEscape(vkCallJoinBase + link)
 	nameEnc := neturl.QueryEscape(name)
 
 	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
 		tlsclient.WithTimeoutSeconds(20),
 		tlsclient.WithClientProfile(profiles.Chrome_146),
 		tlsclient.WithCookieJar(tlsclient.NewCookieJar()),
+		tlsclient.WithDialer(vkDiagnosticDialer()),
 	)
 	if err != nil {
 		return "", "", nil, newVKCallsFailure("setup", vkCallsFailureSetup, fmt.Errorf("create tls client: %w", err))

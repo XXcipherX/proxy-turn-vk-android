@@ -1,6 +1,9 @@
 package com.wdtt.client
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -13,6 +16,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
 
 import androidx.compose.runtime.Stable
 
@@ -24,6 +32,8 @@ data class LogEntry(
     val priority: Int = 99, 
     val isError: Boolean = false
 )
+
+private const val NETWORK_DIAG_TAG = "WDTT-Network"
 
 object TunnelManager {
     
@@ -298,6 +308,7 @@ object TunnelManager {
                 
                 env["WDTT_EVENTS"] = "1"
 
+                logNetworkDiagnostics(appContext)
                 process = pb.start()
                 processStartedAtMs = System.currentTimeMillis()
                 wrapAuthTimeoutCount = 0
@@ -313,6 +324,79 @@ object TunnelManager {
             } finally {
                 startStopMutex.unlock()
             }
+        }
+    }
+
+    private fun logNetworkDiagnostics(context: Context) {
+        var hasIPv4 = false
+        var hasIPv6 = false
+        val entries = mutableListOf<String>()
+
+        try {
+            val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            for (network in manager.allNetworks) {
+                val properties = manager.getLinkProperties(network) ?: continue
+                val capabilities = manager.getNetworkCapabilities(network)
+                val transports = buildList {
+                    if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) add("cell")
+                    if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) add("wifi")
+                    if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true) add("eth")
+                    if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) add("vpn")
+                }.ifEmpty { listOf("other") }.joinToString("+")
+                val validated = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+                for (linkAddress in properties.linkAddresses) {
+                    val address = linkAddress.address
+                    val family = when (address) {
+                        is Inet4Address -> "IPv4"
+                        is Inet6Address -> "IPv6"
+                        else -> continue
+                    }
+                    if (!address.isLoopbackAddress && address is Inet4Address) hasIPv4 = true
+                    if (!address.isLoopbackAddress && address is Inet6Address) hasIPv6 = true
+                    entries += "${properties.interfaceName.orEmpty()}/$family/$transports/${if (validated) "V" else "-"} " +
+                        "${address.hostAddress.orEmpty()}/${linkAddress.prefixLength}"
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(NETWORK_DIAG_TAG, "Failed to read network link properties", e)
+        }
+
+        val vkIPv4 = runCatching {
+            InetAddress.getAllByName("api.vk.ru").firstOrNull { it is Inet4Address }
+        }.onFailure {
+            Log.w(NETWORK_DIAG_TAG, "Failed to resolve api.vk.ru for source probe", it)
+        }.getOrNull()
+        val ipv4Destination = vkIPv4 ?: runCatching { InetAddress.getByName("1.1.1.1") }.getOrNull()
+        val ipv6Destination = runCatching { InetAddress.getByName("2606:4700:4700::1111") }.getOrNull()
+        val ipv4Source = probeSourceSelection(ipv4Destination)
+        val ipv6Source = probeSourceSelection(ipv6Destination)
+
+        Log.i(
+            NETWORK_DIAG_TAG,
+            "interfaces(non-loopback IPv4=$hasIPv4 IPv6=$hasIPv6): ${entries.joinToString(" | ")}"
+        )
+        Log.i(
+            NETWORK_DIAG_TAG,
+            "source probe: IPv4->${ipv4Destination?.hostAddress ?: "unresolved"}:443 source=$ipv4Source | " +
+                "IPv6->[${ipv6Destination?.hostAddress ?: "unresolved"}]:443 source=$ipv6Source"
+        )
+        updateLog(
+            "network_diag",
+            "[СЕТЬ] IPv4=$hasIPv4, IPv6=$hasIPv6 | src4=$ipv4Source | src6=$ipv6Source",
+            4,
+            false
+        )
+    }
+
+    private fun probeSourceSelection(destination: InetAddress?): String {
+        if (destination == null) return "unresolved"
+        return try {
+            DatagramSocket().use { socket ->
+                socket.connect(InetSocketAddress(destination, 443))
+                "${socket.localAddress.hostAddress.orEmpty()}:${socket.localPort}"
+            }
+        } catch (e: Exception) {
+            "${e.javaClass.simpleName}:${e.message.orEmpty()}"
         }
     }
 

@@ -28,6 +28,15 @@ type VKCredentials struct {
 	ClientSecret string
 }
 
+const (
+	// VK's current web/API domain family. Keep the anonymous auth endpoints and
+	// browser headers in one place so a future domain migration is atomic.
+	vkWebHost      = "vk.ru"
+	vkLoginHost    = "login." + vkWebHost
+	vkAPIHost      = "api." + vkWebHost
+	vkCallJoinBase = "https://vk.ru/call/join/"
+)
+
 var vkCredentialsList = loadVKCredentials()
 
 func deobf(s string, shift int) string {
@@ -428,6 +437,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 		tlsclient.WithTimeoutSeconds(20),
 		tlsclient.WithClientProfile(profiles.Chrome_146),
 		tlsclient.WithCookieJar(jar),
+		tlsclient.WithDialer(vkDiagnosticDialer()),
 	)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to initialize tls_client: %w", err)
@@ -454,8 +464,8 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 		applyBrowserProfileFhttp(req, profile)
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("Accept", "*/*")
-		req.Header.Set("Origin", "https://vk.ru")
-		req.Header.Set("Referer", "https://vk.ru/")
+		req.Header.Set("Origin", "https://"+vkWebHost)
+		req.Header.Set("Referer", "https://"+vkWebHost+"/")
 		req.Header.Set("Sec-Fetch-Site", "same-site")
 		req.Header.Set("Sec-Fetch-Mode", "cors")
 		req.Header.Set("Sec-Fetch-Dest", "empty")
@@ -484,7 +494,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 	}
 
 	data := fmt.Sprintf("client_id=%s&token_type=messages&client_secret=%s&version=1&app_id=%s", creds.ClientID, creds.ClientSecret, creds.ClientID)
-	resp, err := doRequest(data, "https://login.vk.ru/?act=get_anonym_token")
+	resp, err := doRequest(data, "https://"+vkLoginHost+"/?act=get_anonym_token")
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -499,8 +509,8 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 
 	vkDelayRandom(100, 150)
 
-	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&fields=photo_200&access_token=%s", link, token1)
-	resp, err = doRequest(data, "https://api.vk.ru/method/calls.getCallPreview?v=5.275&client_id="+creds.ClientID)
+	data = fmt.Sprintf("vk_join_link="+vkCallJoinBase+"%s&fields=photo_200&access_token=%s", link, token1)
+	resp, err = doRequest(data, "https://"+vkAPIHost+"/method/calls.getCallPreview?v=5.275&client_id="+creds.ClientID)
 	if err != nil {
 		log.Printf("[STREAM %d] [VK Auth] Warning: getCallPreview failed: %v", streamID, err)
 	} else if callErr := fatalCallError(resp); callErr != nil {
@@ -510,8 +520,8 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 
 	vkDelayRandom(200, 400)
 
-	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s", link, escapedName, token1)
-	urlAddr := fmt.Sprintf("https://api.vk.ru/method/calls.getAnonymousToken?v=5.275&client_id=%s", creds.ClientID)
+	data = fmt.Sprintf("vk_join_link="+vkCallJoinBase+"%s&name=%s&access_token=%s", link, escapedName, token1)
+	urlAddr := fmt.Sprintf("https://%s/method/calls.getAnonymousToken?v=5.275&client_id=%s", vkAPIHost, creds.ClientID)
 
 	var token2 string
 	var savedProfile *SavedProfile
@@ -549,7 +559,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 					captchaAttempt = "1"
 				}
 
-				data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
+				data = fmt.Sprintf("vk_join_link="+vkCallJoinBase+"%s&name=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
 					link, escapedName, captchaErr.CaptchaSid, neturl.QueryEscape(successToken), captchaErr.CaptchaTs, captchaAttempt, token1)
 				continue
 			}
