@@ -733,6 +733,25 @@ func saveDBCritical() error {
 	return nil
 }
 
+func normalizeVKHashInput(value string) (string, error) {
+	hash := strings.ReplaceAll(strings.TrimSpace(value), " ", "")
+	if hash == "" {
+		return "", errors.New("VK hash must not be empty")
+	}
+	if strings.Contains(strings.ToLower(hash), "http") || strings.Contains(hash, "/") {
+		return "", errors.New("send only a VK hash or comma-separated hashes, not a URL")
+	}
+	if err := validateStoredVKHash(hash); err != nil {
+		return "", err
+	}
+	for _, item := range strings.Split(hash, ",") {
+		if item == "" {
+			return "", errors.New("VK hash list contains an empty item")
+		}
+	}
+	return hash, nil
+}
+
 func generatedPasswordAvailable(database *Database, candidate string) bool {
 	if database == nil || candidate == "" || candidate == database.MainPassword {
 		return false
@@ -1282,13 +1301,9 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 			}
 
 			if waitingForHash {
-				hash := strings.ReplaceAll(cmd, " ", "")
-				if strings.Contains(hash, "http") || strings.Contains(hash, "/") {
-					sendTelegram(token, adminID, "❌ Пожалуйста, отправьте только хеш (или несколько хешей через запятую). Ссылки не поддерживаются.", nil)
-					continue
-				}
-				if hash == "" {
-					sendTelegram(token, adminID, "❌ Хеш не должен быть пустым.", nil)
+				hash, hashErr := normalizeVKHashInput(cmd)
+				if hashErr != nil {
+					sendTelegram(token, adminID, fmt.Sprintf("❌ Некорректный VK-хеш: %v", hashErr), nil)
 					continue
 				}
 				waitingForHash = false

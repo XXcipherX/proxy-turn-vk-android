@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -201,6 +202,41 @@ func TestParsePortTripletRequiresThreeDistinctValidPorts(t *testing.T) {
 	} {
 		if _, err := parsePortTriplet(invalid); err == nil {
 			t.Fatalf("parsePortTriplet(%q) succeeded", invalid)
+		}
+	}
+}
+
+func TestNormalizeVKHashInputOnlyProducesPersistableValues(t *testing.T) {
+	valid := map[string]string{
+		"hash-one":                    "hash-one",
+		" hash-one, hash_two.value ": "hash-one,hash_two.value",
+	}
+	for input, want := range valid {
+		got, err := normalizeVKHashInput(input)
+		if err != nil {
+			t.Fatalf("normalizeVKHashInput(%q): %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("normalizeVKHashInput(%q) = %q, want %q", input, got, want)
+		}
+		if err := validateStoredVKHash(got); err != nil {
+			t.Fatalf("normalized hash %q cannot be loaded from the database: %v", got, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"   ",
+		"hash-one,,hash-two",
+		",hash-one",
+		"hash-one,",
+		"hash\nwith-newline",
+		"https://vk.example/hash",
+		strings.Repeat("a", 2049),
+	}
+	for _, input := range invalid {
+		if got, err := normalizeVKHashInput(input); err == nil {
+			t.Fatalf("normalizeVKHashInput(%q) = %q, want an error", input, got)
 		}
 	}
 }
