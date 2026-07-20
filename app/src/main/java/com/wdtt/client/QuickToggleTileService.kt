@@ -55,8 +55,8 @@ class QuickToggleTileService : TileService() {
 
             
             if (VpnService.prepare(this) != null) {
-                Toast.makeText(this, "Откройте WDTT и выдайте VPN-разрешение", Toast.LENGTH_LONG).show()
-                openMainActivity()
+                Toast.makeText(this, "Разрешите WDTT создать VPN-подключение", Toast.LENGTH_LONG).show()
+                openVpnPermissionActivity()
                 return
             }
 
@@ -147,14 +147,20 @@ class QuickToggleTileService : TileService() {
     }
 
     private fun openMainActivity() {
+        openActivity(Intent(this, MainActivity::class.java), 100)
+    }
+
+    private fun openVpnPermissionActivity() {
+        openActivity(Intent(this, VpnPermissionActivity::class.java), 101)
+    }
+
+    private fun openActivity(intent: Intent, requestCode: Int) {
         runCatching {
-            val intent = Intent(this, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             if (Build.VERSION.SDK_INT >= 34) {
                 val pendingIntent = PendingIntent.getActivity(
                     this,
-                    100,
+                    requestCode,
                     intent,
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
@@ -164,7 +170,7 @@ class QuickToggleTileService : TileService() {
                 startActivityAndCollapse(intent)
             }
         }.onFailure { e ->
-            Log.e("QuickToggleTile", "Failed to open MainActivity", e)
+            Log.e("QuickToggleTile", "Failed to open activity", e)
         }
     }
 

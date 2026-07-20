@@ -4,7 +4,6 @@ import android.app.Application
 import android.content.Context
 import android.util.Log
 import com.wireguard.android.backend.GoBackend
-import com.wireguard.android.backend.Tunnel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,18 +18,6 @@ class WdttApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-            runCatching {
-                val backend = getBackend(this@WdttApplication)
-                val tunnel = WireGuardHelper.WgTunnel()
-                backend.setState(tunnel, Tunnel.State.DOWN, null)
-                Log.d("WdttApp", "Успешно очищен фантомный VPN при холодном старте")
-            }.onFailure {
-                Log.w("WdttApp", "Не удалось очистить фантомный VPN: ${it.message}")
-            }
-        }
-
-        
         CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
             try {
                 TunnelManager.running.collect {

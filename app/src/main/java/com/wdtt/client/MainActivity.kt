@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
@@ -78,15 +77,6 @@ import kotlin.math.min
 import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
-
-    private val vpnLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        
-    }
-
-    private val batteryLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        checkAndRequestVpn()
-    }
-
     private val notificationLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         checkAndRequestBattery()
     }
@@ -198,23 +188,10 @@ class MainActivity : ComponentActivity() {
                 val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                     data = Uri.parse("package:$packageName")
                 }
-                batteryLauncher.launch(intent)
-            } catch (e: Exception) {
-                checkAndRequestVpn()
+                startActivity(intent)
+            } catch (_: Exception) {
+                // Battery optimization settings are optional.
             }
-        } else {
-            checkAndRequestVpn()
-        }
-    }
-
-    private fun checkAndRequestVpn() {
-        try {
-            val vpnIntent = VpnService.prepare(this)
-            if (vpnIntent != null) {
-                vpnLauncher.launch(vpnIntent)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 }

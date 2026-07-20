@@ -59,8 +59,8 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 }
 
                 if (VpnService.prepare(context) != null) {
-                    Toast.makeText(context, "Откройте WDTT и выдайте VPN-разрешение", Toast.LENGTH_LONG).show()
-                    openMainActivity(context)
+                    Toast.makeText(context, "Разрешите WDTT создать VPN-подключение", Toast.LENGTH_LONG).show()
+                    openVpnPermissionActivity(context)
                     return
                 }
 
@@ -175,13 +175,21 @@ class VpnWidgetProvider : AppWidgetProvider() {
     }
 
     private fun openMainActivity(context: Context) {
-        val intent = Intent(context, MainActivity::class.java).apply {
+        openActivity(context, Intent(context, MainActivity::class.java), 200)
+    }
+
+    private fun openVpnPermissionActivity(context: Context) {
+        openActivity(context, Intent(context, VpnPermissionActivity::class.java), 201)
+    }
+
+    private fun openActivity(context: Context, intent: Intent, requestCode: Int) {
+        intent.apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         runCatching {
             val pendingIntent = PendingIntent.getActivity(
                 context,
-                200,
+                requestCode,
                 intent,
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
