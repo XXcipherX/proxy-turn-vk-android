@@ -98,6 +98,7 @@ func main() {
 	adminID := flag.String("admin", "", "Telegram Admin ID")
 	botToken := flag.String("bot-token", "", "Telegram Bot Token")
 	dnsFlag := flag.String("dns", dns, "DNS для клиента (можно несколько через запятую)")
+	publicHost := flag.String("public-host", os.Getenv("WDTT_PUBLIC_HOST"), "публичный IPv4 или DNS-имя для wdtt:// ссылок")
 	maxConnections := flag.Int("max-connections", 512, "максимум одновременных DTLS-соединений")
 	handshakeRate := flag.Int("handshake-rate", 64, "максимум новых DTLS handshakes в секунду")
 	flag.Parse()
@@ -128,6 +129,9 @@ func main() {
 		log.Fatalf("[CONFIG] %v", err)
 	}
 	if err := validateTelegramCredentials(*adminID, *botToken); err != nil {
+		log.Fatalf("[CONFIG] %v", err)
+	}
+	if err := configurePublicHost(*publicHost); err != nil {
 		log.Fatalf("[CONFIG] %v", err)
 	}
 	*adminID = strings.TrimSpace(*adminID)

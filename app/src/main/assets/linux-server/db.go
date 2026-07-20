@@ -127,36 +127,111 @@ var (
 	dbSaveRetryMaxDelay = time.Minute
 )
 
-func getPublicIP() string {
+func validatePublicIPv4(value string) (string, error) {
+	parsed := net.ParseIP(strings.TrimSpace(value))
+	if parsed == nil || parsed.To4() == nil || !parsed.IsGlobalUnicast() || parsed.IsPrivate() ||
+		parsed.IsLoopback() || parsed.IsLinkLocalUnicast() || parsed.IsUnspecified() {
+		return "", fmt.Errorf("%q is not a public IPv4 address", value)
+	}
+	return parsed.To4().String(), nil
+}
+
+func validatePublicHost(value string) (string, error) {
+	host := strings.TrimSpace(value)
+	if host == "" {
+		return "", nil
+	}
+	if parsed := net.ParseIP(host); parsed != nil {
+		return validatePublicIPv4(host)
+	}
+	if len(host) > 253 || strings.ContainsAny(host, "/:\\") {
+		return "", fmt.Errorf("public host %q must be an IPv4 address or DNS name without a scheme, path, or port", value)
+	}
+	if !strings.Contains(host, ".") || strings.EqualFold(host, "localhost") {
+		return "", fmt.Errorf("public host %q is not a public DNS name", value)
+	}
+	if strings.Trim(host, "0123456789.") == "" {
+		return "", fmt.Errorf("public host %q looks like an invalid IPv4 address", value)
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("public host %q is not a valid DNS name", value)
+		}
+		for i := 0; i < len(label); i++ {
+			ch := label[i]
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+				(ch >= '0' && ch <= '9') || ch == '-' {
+				continue
+			}
+			return "", fmt.Errorf("public host %q is not a valid DNS name", value)
+		}
+	}
+	return strings.ToLower(host), nil
+}
+
+func configurePublicHost(value string) error {
+	host, err := validatePublicHost(value)
+	if err != nil {
+		return err
+	}
+	if host == "" {
+		return nil
+	}
+	publicIPCache.Lock()
+	publicIPCache.value = host
+	publicIPCache.Unlock()
+	return nil
+}
+
+func getPublicHost() (string, error) {
 	publicIPCache.RLock()
 	cached := publicIPCache.value
 	publicIPCache.RUnlock()
 	if cached != "" {
-		return cached
+		return cached, nil
 	}
 	resp, err := publicIPHTTPClient.Get(publicIPServiceURL)
 	if err != nil {
-		return "YOUR_SERVER_IP"
+		return "", fmt.Errorf("determine public IPv4: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "YOUR_SERVER_IP"
+		return "", fmt.Errorf("determine public IPv4: HTTP %d", resp.StatusCode)
 	}
 	ipBytes, err := io.ReadAll(io.LimitReader(resp.Body, 65))
 	if err != nil || len(ipBytes) > 64 {
-		return "YOUR_SERVER_IP"
+		if err != nil {
+			return "", fmt.Errorf("read public IPv4 response: %w", err)
+		}
+		return "", errors.New("public IPv4 response is too large")
 	}
-	parsed := net.ParseIP(strings.TrimSpace(string(ipBytes)))
-	if parsed == nil || parsed.To4() == nil || !parsed.IsGlobalUnicast() || parsed.IsPrivate() || parsed.IsLoopback() {
-		return "YOUR_SERVER_IP"
+	publicIPv4, err := validatePublicIPv4(string(ipBytes))
+	if err != nil {
+		return "", fmt.Errorf("validate detected public IPv4: %w", err)
 	}
 	publicIPCache.Lock()
 	if publicIPCache.value == "" {
-		publicIPCache.value = parsed.To4().String()
+		publicIPCache.value = publicIPv4
 	}
 	cached = publicIPCache.value
 	publicIPCache.Unlock()
-	return cached
+	return cached, nil
+}
+
+func buildQuickLink(ports, password, hash string) (string, error) {
+	if ports == "" {
+		ports = "56000,56001,9000"
+	}
+	canonicalPorts, err := parsePortTriplet(ports)
+	if err != nil {
+		return "", fmt.Errorf("invalid quick-link ports: %w", err)
+	}
+	host, err := getPublicHost()
+	if err != nil {
+		return "", err
+	}
+	parts := strings.Split(canonicalPorts, ",")
+	return fmt.Sprintf("wdtt://%s:%s:%s:%s:%s:%s", host, parts[0], parts[1], parts[2], password, hash), nil
 }
 
 func stripVkUrl(url string) string {
@@ -1205,13 +1280,13 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 					entry = &entrySnapshot
 					txt := fmt.Sprintf("🔑 *Пароль:* `%s`\n", pass)
 					if entry.VkHash != "" {
-						pts := strings.Split(entry.Ports, ",")
-						if len(pts) < 3 {
-							pts = []string{"56000", "56001", "9000"}
+						link, linkErr := buildQuickLink(entry.Ports, pass, entry.VkHash)
+						if linkErr != nil {
+							log.Printf("[TG] Быстрая ссылка для %s: %v", maskPassword(pass), linkErr)
+							txt += "⚠️ Быстрая ссылка недоступна: задайте `WDTT_PUBLIC_HOST` или `-public-host`.\n"
+						} else {
+							txt += fmt.Sprintf("🔗 *Быстрая ссылка:* `%s`\n", link)
 						}
-						srvIP := getPublicIP()
-						link := fmt.Sprintf("wdtt://%s:%s:%s:%s:%s:%s", srvIP, pts[0], pts[1], pts[2], pass, entry.VkHash)
-						txt += fmt.Sprintf("🔗 *Быстрая ссылка:* `%s`\n", link)
 					}
 					if entry.IsDeactivated {
 						txt += "🔴 Статус: *ДЕАКТИВИРОВАН*\n"
@@ -1446,9 +1521,12 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 				}
 
 				if target == telegramDialogMainPassword {
-					srvIP := getPublicIP()
-					pts := strings.Split(tempPorts, ",")
-					link := fmt.Sprintf("wdtt://%s:%s:%s:%s:%s:%s", srvIP, pts[0], pts[1], pts[2], db.MainPassword, hash)
+					link, linkErr := buildQuickLink(tempPorts, db.MainPassword, hash)
+					if linkErr != nil {
+						log.Printf("[TG] Быстрая ссылка главного пароля: %v", linkErr)
+						sendTelegram(token, adminID, "❌ Не удалось определить публичный адрес сервера. Задайте `WDTT_PUBLIC_HOST` или `-public-host` и повторите действие.", nil)
+						continue
+					}
 					sendTelegram(token, adminID, fmt.Sprintf("🔗 *Ссылка для главного пароля:*\n`%s`", link), nil)
 					continue
 				}
@@ -1517,11 +1595,15 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 				setPasswordAccessState(newPass, false, true, expiresAt)
 
 				expDate := time.Unix(expiresAt, 0).Format("02.01.2006")
-				srvIP := getPublicIP()
-				pts := strings.Split(tempPorts, ",")
-				link := fmt.Sprintf("wdtt://%s:%s:%s:%s:%s:%s", srvIP, pts[0], pts[1], pts[2], newPass, hash)
-
-				sendTelegram(token, adminID, fmt.Sprintf("🔑 Новый пароль:\n`%s`\n\n⏰ Действует %d дн. (до %s)\n📱 Ожидает первого подключения\n\n🔗 *Быстрая ссылка:* `%s`", newPass, tempDays, expDate, link), nil)
+				message := fmt.Sprintf("🔑 Новый пароль:\n`%s`\n\n⏰ Действует %d дн. (до %s)\n📱 Ожидает первого подключения", newPass, tempDays, expDate)
+				link, linkErr := buildQuickLink(tempPorts, newPass, hash)
+				if linkErr != nil {
+					log.Printf("[TG] Быстрая ссылка нового пароля %s: %v", maskPassword(newPass), linkErr)
+					message += "\n\n⚠️ Пароль создан, но быстрая ссылка недоступна. Задайте `WDTT_PUBLIC_HOST` или `-public-host`."
+				} else {
+					message += fmt.Sprintf("\n\n🔗 *Быстрая ссылка:* `%s`", link)
+				}
+				sendTelegram(token, adminID, message, nil)
 				continue
 			}
 		}

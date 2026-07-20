@@ -41,6 +41,20 @@ func TestServerConfigurationValidation(t *testing.T) {
 	if err := validateTelegramCredentials("42", "123:valid-token_1"); err != nil {
 		t.Fatalf("valid Telegram credentials: %v", err)
 	}
+
+	for _, host := range []string{"http://example.com", "example.com:56000", "-bad.example", "bad_.example", "localhost", "999.999.999.999", "10.0.0.1", "2001:db8::1"} {
+		if _, err := validatePublicHost(host); err == nil {
+			t.Fatalf("validatePublicHost(%q) succeeded", host)
+		}
+	}
+	for input, want := range map[string]string{
+		"8.8.8.8":     "8.8.8.8",
+		"VPN.Example": "vpn.example",
+	} {
+		if got, err := validatePublicHost(input); err != nil || got != want {
+			t.Fatalf("validatePublicHost(%q) = %q, %v; want %q", input, got, err, want)
+		}
+	}
 }
 
 func TestGetPublicIPRejectsUntrustedResponsesAndCachesValidIPv4(t *testing.T) {
@@ -71,19 +85,45 @@ func TestGetPublicIPRejectsUntrustedResponsesAndCachesValidIPv4(t *testing.T) {
 		publicIPCache.Unlock()
 	})
 
-	if got := getPublicIP(); got != "YOUR_SERVER_IP" {
-		t.Fatalf("private response = %q", got)
+	if got, err := getPublicHost(); err == nil || got != "" {
+		t.Fatalf("private response = %q, %v", got, err)
 	}
-	if got := getPublicIP(); got != "YOUR_SERVER_IP" {
-		t.Fatalf("invalid response = %q", got)
+	if got, err := getPublicHost(); err == nil || got != "" {
+		t.Fatalf("invalid response = %q, %v", got, err)
 	}
-	if got := getPublicIP(); got != "198.51.100.42" {
-		t.Fatalf("valid public response = %q", got)
+	if got, err := getPublicHost(); err != nil || got != "198.51.100.42" {
+		t.Fatalf("valid public response = %q, %v", got, err)
 	}
-	if got := getPublicIP(); got != "198.51.100.42" {
-		t.Fatalf("cached public response = %q", got)
+	if got, err := getPublicHost(); err != nil || got != "198.51.100.42" {
+		t.Fatalf("cached public response = %q, %v", got, err)
 	}
 	if got := requests.Load(); got != 3 {
 		t.Fatalf("HTTP requests = %d, want 3", got)
+	}
+}
+
+func TestConfiguredPublicHostOverridesNetworkDetection(t *testing.T) {
+	publicIPCache.Lock()
+	oldCached := publicIPCache.value
+	publicIPCache.value = ""
+	publicIPCache.Unlock()
+	t.Cleanup(func() {
+		publicIPCache.Lock()
+		publicIPCache.value = oldCached
+		publicIPCache.Unlock()
+	})
+
+	if err := configurePublicHost("VPN.Example"); err != nil {
+		t.Fatalf("configurePublicHost: %v", err)
+	}
+	if got, err := getPublicHost(); err != nil || got != "vpn.example" {
+		t.Fatalf("configured public host = %q, %v", got, err)
+	}
+	link, err := buildQuickLink("56000,56001,9000", "Main-Test_7kM9xQ2", "vk-hash")
+	if err != nil {
+		t.Fatalf("buildQuickLink: %v", err)
+	}
+	if link != "wdtt://vpn.example:56000:56001:9000:Main-Test_7kM9xQ2:vk-hash" {
+		t.Fatalf("quick link = %q", link)
 	}
 }
