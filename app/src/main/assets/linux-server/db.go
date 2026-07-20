@@ -226,6 +226,14 @@ func disablePasswordAccessState(password string, isMain bool) {
 	}
 }
 
+func removePasswordAccessState(password string, isMain bool) {
+	key := passwordAccessStateKey(password, isMain)
+	if value, ok := passwordAccessStates.Load(key); ok {
+		value.(*passwordAccessState).active.Store(false)
+		passwordAccessStates.Delete(key)
+	}
+}
+
 func rebuildPasswordAccessStatesLocked() {
 	passwordAccessStates.Range(func(key, value interface{}) bool {
 		value.(*passwordAccessState).active.Store(false)
@@ -1562,8 +1570,15 @@ func deleteGeneratedPassword(wgDev *device.Device, password string) (bool, error
 	dbMutex.RUnlock()
 
 	disablePasswordAccessState(password, false)
+	serverWrapKeys.RemovePassword(password)
 	if deviceSnapshot != nil {
 		if err := removePeerFromWG(wgDev, deviceSnapshot); err != nil {
+			if !entrySnapshot.IsDeactivated && !isPasswordExpired(&entrySnapshot) {
+				if restoreErr := serverWrapKeys.AddPassword(password); restoreErr != nil {
+					removePasswordAccessState(password, false)
+					return true, errors.Join(err, fmt.Errorf("restore WRAP key after peer removal failure: %w", restoreErr))
+				}
+			}
 			setPasswordAccessState(password, false, !entrySnapshot.IsDeactivated && !isPasswordExpired(&entrySnapshot), entrySnapshot.ExpiresAt)
 			return true, err
 		}
@@ -1575,10 +1590,10 @@ func deleteGeneratedPassword(wgDev *device.Device, password string) (bool, error
 		delete(db.Passwords, password)
 	}
 	dbMutex.Unlock()
+	removePasswordAccessState(password, false)
 	if err := saveDBCritical(); err != nil {
 		return true, err
 	}
-	serverWrapKeys.RemovePassword(password)
 	return true, nil
 }
 
@@ -1650,6 +1665,7 @@ func cleanupExpiredPasswords(wgDev *device.Device) (int, error) {
 				delete(db.Devices, current.DeviceID)
 			}
 			delete(db.Passwords, item.password)
+			removePasswordAccessState(item.password, false)
 			removed++
 		}
 		dbMutex.Unlock()

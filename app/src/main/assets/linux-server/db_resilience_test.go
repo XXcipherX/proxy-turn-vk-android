@@ -95,6 +95,68 @@ func TestCriticalSaveReportsPersistenceFailure(t *testing.T) {
 	}
 }
 
+func TestDeletePasswordRevokesWrapKeyAfterPersistenceFailure(t *testing.T) {
+	resetDelayedSaveStateForTest()
+	oldPersist := persistDatabase
+	oldDB := db
+	oldWrapKeys := serverWrapKeys
+	defer func() {
+		resetDelayedSaveStateForTest()
+		persistDatabase = oldPersist
+		db = oldDB
+		serverWrapKeys = oldWrapKeys
+	}()
+
+	const (
+		mainPassword = "Main-Test_7kM9xQ2"
+		password     = "temporary-delete"
+	)
+	db = &Database{
+		MainPassword: mainPassword,
+		Passwords: map[string]*PasswordEntry{
+			password: {ExpiresAt: time.Now().Add(time.Hour).Unix()},
+		},
+		Devices: make(map[string]*ClientDevice),
+	}
+	serverWrapKeys = newWrapKeyStore()
+	if err := serverWrapKeys.SetPasswords(mainPassword, []string{password}); err != nil {
+		t.Fatalf("SetPasswords: %v", err)
+	}
+	existingState := setPasswordAccessState(password, false, true, db.Passwords[password].ExpiresAt)
+	persistDatabase = func() error { return errors.New("injected persistence failure") }
+
+	exists, err := deleteGeneratedPassword(nil, password)
+	if !exists || err == nil {
+		t.Fatalf("deleteGeneratedPassword = (%v, %v), want an existing password and persistence error", exists, err)
+	}
+	if serverWrapKeys.Count() != 1 {
+		t.Fatalf("WRAP key count = %d, want only the main key", serverWrapKeys.Count())
+	}
+	if existingState.IsActive() {
+		t.Fatal("an existing connection retained active access after password deletion")
+	}
+	if state := getPasswordAccessState(password, false); state != nil {
+		t.Fatal("deleted password remained in the access-state map")
+	}
+	if _, exists := db.Passwords[password]; exists {
+		t.Fatal("deleted password remained in the in-memory database")
+	}
+}
+
+func TestRemovePasswordAccessStateInvalidatesExistingReaders(t *testing.T) {
+	const password = "temporary-access-state"
+	state := setPasswordAccessState(password, false, true, time.Now().Add(time.Hour).Unix())
+	removePasswordAccessState(password, false)
+	defer removePasswordAccessState(password, false)
+
+	if state.IsActive() {
+		t.Fatal("existing access-state reader remained active")
+	}
+	if current := getPasswordAccessState(password, false); current != nil {
+		t.Fatal("removed access state remained discoverable")
+	}
+}
+
 func validPersistentDatabaseForTest(t *testing.T) *Database {
 	t.Helper()
 	privateKey, publicKey, err := generateKeyPair()
