@@ -82,6 +82,45 @@ func TestTelegramPollingBackoffIsBounded(t *testing.T) {
 	}
 }
 
+func TestTelegramDialogStateDoesNotMixMainAndTemporaryFlows(t *testing.T) {
+	var dialog telegramDialogState
+	dialog.beginMainPasswordLink()
+	dialog.beginTemporaryPassword()
+
+	if dialog.stage != telegramDialogWaitingForDays || dialog.target != telegramDialogTemporaryPassword {
+		t.Fatalf("temporary flow did not replace main-link state: %+v", dialog)
+	}
+	if dialog.useDefaultPorts() {
+		t.Fatal("stale port callback advanced a flow that was waiting for days")
+	}
+	if !dialog.acceptDays(30) || !dialog.useDefaultPorts() {
+		t.Fatal("valid temporary-password flow did not advance")
+	}
+	target, days, ports, ok := dialog.finishHash()
+	if !ok || target != telegramDialogTemporaryPassword || days != 30 || ports != "56000,56001,9000" {
+		t.Fatalf("completed temporary flow = (%v, %d, %q, %v)", target, days, ports, ok)
+	}
+	if dialog.stage != telegramDialogIdle || dialog.target != telegramDialogNoTarget {
+		t.Fatalf("completed flow retained stale state: %+v", dialog)
+	}
+}
+
+func TestTelegramDialogRejectsStalePortCallbacks(t *testing.T) {
+	var dialog telegramDialogState
+	if dialog.useDefaultPorts() || dialog.requestCustomPorts() {
+		t.Fatal("idle dialog accepted a stale port callback")
+	}
+
+	dialog.beginMainPasswordLink()
+	if !dialog.requestCustomPorts() || !dialog.acceptPorts("56002,56003,9001") {
+		t.Fatal("main-link custom-port flow did not advance")
+	}
+	dialog.reset()
+	if _, _, _, ok := dialog.finishHash(); ok {
+		t.Fatal("reset dialog completed a stale hash flow")
+	}
+}
+
 func TestPostTelegramSuccess(t *testing.T) {
 	const token = "ci-secret-token"
 	withTelegramTestServer(t, func(w http.ResponseWriter, r *http.Request) {

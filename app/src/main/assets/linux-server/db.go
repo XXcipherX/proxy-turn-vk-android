@@ -1034,6 +1034,91 @@ func getTelegramUpdates(ctx context.Context, client *http.Client, token string, 
 	return result.Result, 0, nil
 }
 
+type telegramDialogStage uint8
+
+const (
+	telegramDialogIdle telegramDialogStage = iota
+	telegramDialogWaitingForDays
+	telegramDialogWaitingForPortChoice
+	telegramDialogWaitingForPorts
+	telegramDialogWaitingForHash
+)
+
+type telegramDialogTarget uint8
+
+const (
+	telegramDialogNoTarget telegramDialogTarget = iota
+	telegramDialogTemporaryPassword
+	telegramDialogMainPassword
+)
+
+type telegramDialogState struct {
+	stage  telegramDialogStage
+	target telegramDialogTarget
+	days   int
+	ports  string
+}
+
+func (s *telegramDialogState) reset() {
+	*s = telegramDialogState{}
+}
+
+func (s *telegramDialogState) beginTemporaryPassword() {
+	s.reset()
+	s.target = telegramDialogTemporaryPassword
+	s.stage = telegramDialogWaitingForDays
+}
+
+func (s *telegramDialogState) beginMainPasswordLink() {
+	s.reset()
+	s.target = telegramDialogMainPassword
+	s.stage = telegramDialogWaitingForPortChoice
+}
+
+func (s *telegramDialogState) acceptDays(days int) bool {
+	if s.stage != telegramDialogWaitingForDays || s.target != telegramDialogTemporaryPassword {
+		return false
+	}
+	s.days = days
+	s.stage = telegramDialogWaitingForPortChoice
+	return true
+}
+
+func (s *telegramDialogState) useDefaultPorts() bool {
+	if s.stage != telegramDialogWaitingForPortChoice || s.target == telegramDialogNoTarget {
+		return false
+	}
+	s.ports = "56000,56001,9000"
+	s.stage = telegramDialogWaitingForHash
+	return true
+}
+
+func (s *telegramDialogState) requestCustomPorts() bool {
+	if s.stage != telegramDialogWaitingForPortChoice || s.target == telegramDialogNoTarget {
+		return false
+	}
+	s.stage = telegramDialogWaitingForPorts
+	return true
+}
+
+func (s *telegramDialogState) acceptPorts(ports string) bool {
+	if s.stage != telegramDialogWaitingForPorts || s.target == telegramDialogNoTarget {
+		return false
+	}
+	s.ports = ports
+	s.stage = telegramDialogWaitingForHash
+	return true
+}
+
+func (s *telegramDialogState) finishHash() (telegramDialogTarget, int, string, bool) {
+	if s.stage != telegramDialogWaitingForHash || s.target == telegramDialogNoTarget || s.ports == "" {
+		return telegramDialogNoTarget, 0, "", false
+	}
+	target, days, ports := s.target, s.days, s.ports
+	s.reset()
+	return target, days, ports, true
+}
+
 func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device.Device) {
 	if token == "" || adminIDstr == "" {
 		return
@@ -1057,13 +1142,7 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 	offset := 0
 	pollFailures := 0
 
-	var waitingForDays bool
-	var waitingForPorts bool
-	var waitingForHash bool
-	var targetPassword string
-
-	var tempDays int
-	var tempPorts string
+	var dialog telegramDialogState
 
 	for {
 		select {
@@ -1101,6 +1180,9 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 					"callback_query_id": u.CallbackQuery.ID,
 				}); err != nil {
 					log.Printf("[TG] answerCallbackQuery: %v", err)
+				}
+				if data != "mainlink" && data != "ports_def" && data != "ports_custom" {
+					dialog.reset()
 				}
 
 				if strings.HasPrefix(data, "viewpass_") {
@@ -1212,7 +1294,7 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 					}
 
 				} else if data == "mainlink" {
-					targetPassword = "main"
+					dialog.beginMainPasswordLink()
 					var keyboard [][]map[string]interface{}
 					keyboard = append(keyboard, []map[string]interface{}{
 						{"text": "Да", "callback_data": "ports_def"},
@@ -1260,11 +1342,18 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 				} else if data == "backlist" {
 					sendPasswordList(token, adminID, wgDev)
 				} else if data == "ports_def" {
-					tempPorts = "56000,56001,9000"
-					waitingForHash = true
+					if !dialog.useDefaultPorts() {
+						dialog.reset()
+						sendTelegram(token, adminID, "❌ Эта кнопка устарела. Начните действие заново через /new или главное меню.", nil)
+						continue
+					}
 					sendTelegram(token, adminID, "🔑 Укажите VK хеш (или несколько через запятую):", nil)
 				} else if data == "ports_custom" {
-					waitingForPorts = true
+					if !dialog.requestCustomPorts() {
+						dialog.reset()
+						sendTelegram(token, adminID, "❌ Эта кнопка устарела. Начните действие заново через /new или главное меню.", nil)
+						continue
+					}
 					sendTelegram(token, adminID, "⚙️ Укажите через запятую 3 порта (DTLS,WG,TUN):\nНапример: 56000,56001,9000", nil)
 				}
 			}
@@ -1276,14 +1365,48 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 
 			cmd := strings.TrimSpace(msg.Text)
 
-			if waitingForDays {
-				waitingForDays = false
+			if cmd == "/start" || cmd == "/help" {
+				dialog.reset()
+				sendTelegram(token, adminID, "🤖 *WDTT VPN Manager*\n\n/new — Создать пароль\n/list — Список паролей", nil)
+				continue
+			}
+			if cmd == "/list" {
+				dialog.reset()
+				sendPasswordList(token, adminID, wgDev)
+				continue
+			}
+			if cmd == "/new" {
+				dialog.reset()
+				removed, cleanupErr := cleanupExpiredPasswords(wgDev)
+				if cleanupErr != nil {
+					log.Printf("[DB] Очистка истёкших паролей: %v", cleanupErr)
+				}
+				if removed > 0 {
+					log.Printf("[DB] Удалено истёкших паролей: %d", removed)
+				}
+				dbMutex.RLock()
+				atLimit := len(db.Passwords) >= maxGeneratedPasswords
+				dbMutex.RUnlock()
+				if atLimit {
+					sendTelegram(token, adminID, fmt.Sprintf("❌ Лимит паролей: максимум %d активных. Удалите ненужный пароль через /list.", maxGeneratedPasswords), nil)
+					continue
+				}
+				dialog.beginTemporaryPassword()
+				sendTelegram(token, adminID, "📅 Введите срок действия пароля в днях (1–365):\n\n_Примеры: 30 = месяц, 365 = год_", nil)
+				continue
+			}
+
+			if dialog.stage == telegramDialogWaitingForDays {
 				days, parseErr := strconv.Atoi(cmd)
 				if parseErr != nil || days < 1 || days > 365 {
+					dialog.reset()
 					sendTelegram(token, adminID, "❌ Неверное значение. Укажите число от 1 до 365, или отправьте /new заново.", nil)
 					continue
 				}
-				tempDays = days
+				if !dialog.acceptDays(days) {
+					dialog.reset()
+					continue
+				}
 
 				var keyboard [][]map[string]interface{}
 				keyboard = append(keyboard, []map[string]interface{}{
@@ -1294,30 +1417,35 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 				continue
 			}
 
-			if waitingForPorts {
+			if dialog.stage == telegramDialogWaitingForPorts {
 				canonicalPorts, portErr := parsePortTriplet(cmd)
 				if portErr != nil {
 					sendTelegram(token, adminID, fmt.Sprintf("❌ Неверные порты: %v. Укажите три разных значения от 1 до 65535:", portErr), nil)
 					continue
 				}
 
-				waitingForPorts = false
-				tempPorts = canonicalPorts
-				waitingForHash = true
+				if !dialog.acceptPorts(canonicalPorts) {
+					dialog.reset()
+					continue
+				}
 				sendTelegram(token, adminID, "🔑 Укажите VK хеш (или несколько через запятую):", nil)
 				continue
 			}
 
-			if waitingForHash {
+			if dialog.stage == telegramDialogWaitingForHash {
 				hash, hashErr := normalizeVKHashInput(cmd)
 				if hashErr != nil {
 					sendTelegram(token, adminID, fmt.Sprintf("❌ Некорректный VK-хеш: %v", hashErr), nil)
 					continue
 				}
-				waitingForHash = false
+				target, tempDays, tempPorts, completed := dialog.finishHash()
+				if !completed {
+					dialog.reset()
+					sendTelegram(token, adminID, "❌ Состояние диалога устарело. Начните действие заново.", nil)
+					continue
+				}
 
-				if targetPassword == "main" {
-					targetPassword = ""
+				if target == telegramDialogMainPassword {
 					srvIP := getPublicIP()
 					pts := strings.Split(tempPorts, ",")
 					link := fmt.Sprintf("wdtt://%s:%s:%s:%s:%s:%s", srvIP, pts[0], pts[1], pts[2], db.MainPassword, hash)
@@ -1395,31 +1523,6 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 
 				sendTelegram(token, adminID, fmt.Sprintf("🔑 Новый пароль:\n`%s`\n\n⏰ Действует %d дн. (до %s)\n📱 Ожидает первого подключения\n\n🔗 *Быстрая ссылка:* `%s`", newPass, tempDays, expDate, link), nil)
 				continue
-			}
-
-			if cmd == "/start" || cmd == "/help" {
-				sendTelegram(token, adminID, "🤖 *WDTT VPN Manager*\n\n/new — Создать пароль\n/list — Список паролей", nil)
-
-			} else if cmd == "/new" {
-				removed, cleanupErr := cleanupExpiredPasswords(wgDev)
-				if cleanupErr != nil {
-					log.Printf("[DB] Очистка истёкших паролей: %v", cleanupErr)
-				}
-				if removed > 0 {
-					log.Printf("[DB] Удалено истёкших паролей: %d", removed)
-				}
-				dbMutex.Lock()
-				if len(db.Passwords) >= maxGeneratedPasswords {
-					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("❌ Лимит паролей: максимум %d активных. Удалите ненужный пароль через /list.", maxGeneratedPasswords), nil)
-					continue
-				}
-				dbMutex.Unlock()
-				waitingForDays = true
-				sendTelegram(token, adminID, "📅 Введите срок действия пароля в днях (1–365):\n\n_Примеры: 30 = месяц, 365 = год_", nil)
-
-			} else if cmd == "/list" {
-				sendPasswordList(token, adminID, wgDev)
 			}
 		}
 	}
