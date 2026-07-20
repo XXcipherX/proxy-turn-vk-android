@@ -235,6 +235,18 @@ func TestWrapKeyStoreUnwrapSelectsKey(t *testing.T) {
 	}
 }
 
+func testDTLSClientHello() []byte {
+	payload := make([]byte, 13+12+38)
+	payload[0] = 22
+	payload[1] = 0xfe
+	payload[2] = 0xfd
+	binary.BigEndian.PutUint16(payload[11:13], uint16(len(payload)-13))
+	payload[13] = 1
+	payload[16] = 38
+	payload[24] = 38
+	return payload
+}
+
 func TestAcceptWrappedPacketAuthenticatesBeforeAdmission(t *testing.T) {
 	const password = "admission-main-password"
 	keys := newWrapKeyStore()
@@ -247,14 +259,7 @@ func TestAcceptWrappedPacketAuthenticatesBeforeAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getAEAD: %v", err)
 	}
-	payload := make([]byte, 13+12+38)
-	payload[0] = 22
-	payload[1] = 0xfe
-	payload[2] = 0xfd
-	binary.BigEndian.PutUint16(payload[11:13], uint16(len(payload)-13))
-	payload[13] = 1
-	payload[16] = 38
-	payload[24] = 38
+	payload := testDTLSClientHello()
 	wire := make([]byte, obfsWrapWireLen(len(payload), NewObfsConfig()))
 	n, err := obfsWrapPacketInto(wire, aead, payload, NewObfsConfig(), NewObfsState())
 	if err != nil {
@@ -291,6 +296,47 @@ func TestAcceptWrappedPacketAuthenticatesBeforeAdmission(t *testing.T) {
 	replayCache := newWrapReplayCache()
 	if !acceptWrappedPacketOnce(keys, replayCache, wire[:n]) || acceptWrappedPacketOnce(keys, replayCache, wire[:n]) {
 		t.Fatal("first WRAP packet replay was not rejected")
+	}
+}
+
+func TestWrapPacketConnPrimeSelectsIdentityAndReplaysClientHello(t *testing.T) {
+	const password = "prime-identity-password"
+	keys := newWrapKeyStore()
+	if err := keys.SetPasswords(password, nil); err != nil {
+		t.Fatalf("SetPasswords: %v", err)
+	}
+	clientRaw, serverRaw := newFakePair()
+	server := &wrapPacketConn{inner: serverRaw, keys: keys}
+
+	key := testKey(t, password)
+	aead, err := getAEAD(key)
+	if err != nil {
+		t.Fatalf("getAEAD: %v", err)
+	}
+	clientHello := testDTLSClientHello()
+	cfg := NewObfsConfig()
+	wire := make([]byte, obfsWrapWireLen(len(clientHello), cfg))
+	n, err := obfsWrapPacketInto(wire, aead, clientHello, cfg, NewObfsState())
+	if err != nil {
+		t.Fatalf("wrap ClientHello: %v", err)
+	}
+	if _, err := clientRaw.WriteTo(wire[:n], clientRaw.remote); err != nil {
+		t.Fatalf("write ClientHello: %v", err)
+	}
+	if err := server.prime(); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+	identity, ok := server.Identity()
+	if !ok || !identity.IsMain || identity.Password != password {
+		t.Fatalf("identity = %+v, %v", identity, ok)
+	}
+	got := make([]byte, maxWrappedPacketSize)
+	gotN, _, err := server.ReadFrom(got)
+	if err != nil {
+		t.Fatalf("read primed packet: %v", err)
+	}
+	if !bytes.Equal(got[:gotN], clientHello) {
+		t.Fatal("primed ClientHello was not replayed unchanged")
 	}
 }
 

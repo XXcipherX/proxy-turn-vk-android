@@ -404,6 +404,13 @@ func (l *wrapPacketListener) Accept() (net.PacketConn, net.Addr, error) {
 		return pc, addr, err
 	}
 	wrapped := &wrapPacketConn{inner: pc, keys: l.keys}
+	// Select the authenticated WRAP identity before handing the connection to
+	// DTLS. This lets the outer accept loop enforce per-credential admission
+	// limits before an expensive handshake can consume a global worker slot.
+	if err := wrapped.prime(); err != nil {
+		_ = pc.Close()
+		return nil, nil, err
+	}
 	addrKey := addr.String()
 	wrapped.onClose = func() {
 		l.connsMu.Lock()
@@ -452,8 +459,26 @@ type wrapPacketConn struct {
 	txMu  sync.Mutex
 	txBuf []byte
 
+	primedPacket []byte
+	primedAddr   net.Addr
+
 	closeOnce sync.Once
 	onClose   func()
+}
+
+func (c *wrapPacketConn) prime() error {
+	var plaintext [maxWrappedPacketSize]byte
+	n, addr, err := c.ReadFrom(plaintext[:])
+	if err != nil {
+		return fmt.Errorf("wrap: read admitted ClientHello: %w", err)
+	}
+	if n == 0 {
+		return errors.New("wrap: admitted an empty ClientHello")
+	}
+	c.primedPacket = append(c.primedPacket[:0], plaintext[:n]...)
+	c.primedAddr = addr
+	zeroBytes(plaintext[:n])
+	return nil
 }
 
 func (c *wrapPacketConn) Identity() (wrapIdentity, bool) {
@@ -464,6 +489,17 @@ func (c *wrapPacketConn) Identity() (wrapIdentity, bool) {
 }
 
 func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	if len(c.primedPacket) > 0 {
+		if len(p) < len(c.primedPacket) {
+			return 0, c.primedAddr, errors.New("wrap: destination buffer too small for admitted ClientHello")
+		}
+		n := copy(p, c.primedPacket)
+		zeroBytes(c.primedPacket)
+		c.primedPacket = nil
+		addr := c.primedAddr
+		c.primedAddr = nil
+		return n, addr, nil
+	}
 	var buf [maxWrappedPacketSize]byte
 
 	// Повреждённый пакет не должен закрывать целую DTLS-сессию. Это особенно
@@ -557,6 +593,10 @@ func (c *wrapPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 
 func (c *wrapPacketConn) Close() error {
 	c.closeOnce.Do(func() {
+		zeroBytes(c.primedPacket)
+		c.primedPacket = nil
+		zeroBytes(c.key)
+		c.key = nil
 		if c.onClose != nil {
 			c.onClose()
 		}

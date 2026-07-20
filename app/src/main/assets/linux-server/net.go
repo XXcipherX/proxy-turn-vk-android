@@ -733,7 +733,7 @@ func addTraffic(total, passwordTotal *int64, bytes int, trackPassword bool) {
 	}
 }
 
-func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacketListener, identityLimit *identityConnectionLimiter, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
+func handleConn(ctx context.Context, clientConn net.Conn, identity wrapIdentity, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
 	// Добавлен defer для предотвращения утечки сокетов при ошибках на любом этапе функции
 	defer clientConn.Close()
 	stopShutdownDeadline := context.AfterFunc(ctx, func() {
@@ -755,11 +755,6 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 	}
 	hcancel()
 
-	identity, ok := authSource.IdentityFor(clientConn.RemoteAddr())
-	if !ok {
-		log.Printf("[WRAP] Отказ: не удалось связать DTLS с WRAP-ключом для %s", clientConn.RemoteAddr())
-		return
-	}
 	connPassword := identity.Password
 	connIsMainPass := identity.IsMain
 
@@ -769,13 +764,6 @@ func handleConn(ctx context.Context, clientConn net.Conn, authSource *wrapPacket
 		log.Printf("[WRAP] Отказ: неактивный ключ %s для %s", maskPassword(connPassword), clientConn.RemoteAddr())
 		return
 	}
-	if !identityLimit.TryAcquire(identity, clientConn.RemoteAddr()) {
-		atomic.AddInt64(&rejectedConns, 1)
-		log.Printf("[LIMIT] Отказ: исчерпана квота ключа/IP для %s", clientConn.RemoteAddr())
-		return
-	}
-	defer identityLimit.Release(identity, clientConn.RemoteAddr())
-
 	atomic.AddInt32(&activeConns, 1)
 	defer atomic.AddInt32(&activeConns, -1)
 

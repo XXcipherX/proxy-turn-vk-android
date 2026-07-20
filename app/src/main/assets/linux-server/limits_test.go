@@ -22,7 +22,7 @@ func TestConnectionLimiterCapsConcurrentConnections(t *testing.T) {
 }
 
 func TestIdentityLimiterReservesCapacityAndCapsTemporaryUsers(t *testing.T) {
-	limiter := newIdentityConnectionLimiter(8)
+	limiter := newIdentityConnectionLimiter(8, 64)
 	first := wrapIdentity{Password: "temporary-one"}
 	second := wrapIdentity{Password: "temporary-two"}
 	owner := wrapIdentity{Password: "main", IsMain: true}
@@ -46,7 +46,7 @@ func TestIdentityLimiterReservesCapacityAndCapsTemporaryUsers(t *testing.T) {
 		t.Fatal("released temporary-password quota was not reusable")
 	}
 
-	reserved := newIdentityConnectionLimiter(8)
+	reserved := newIdentityConnectionLimiter(8, 64)
 	for i := 0; i < reserved.maxGeneratedTotal; i++ {
 		identity := wrapIdentity{Password: fmt.Sprintf("temporary-%d", i)}
 		addr := &net.UDPAddr{IP: net.ParseIP(fmt.Sprintf("192.0.2.%d", i+1)), Port: 1000}
@@ -59,6 +59,26 @@ func TestIdentityLimiterReservesCapacityAndCapsTemporaryUsers(t *testing.T) {
 	}
 	if !reserved.TryAcquire(owner, firstIP) {
 		t.Fatal("owner could not use capacity reserved from temporary users")
+	}
+}
+
+func TestIdentityLimiterRateLimitsTemporaryPasswordsBeforeHandshake(t *testing.T) {
+	limiter := newIdentityConnectionLimiter(512, 64)
+	identity := wrapIdentity{Password: "temporary-rate-limited"}
+	addr := &net.UDPAddr{IP: net.ParseIP("198.51.100.25"), Port: 40000}
+
+	accepted := 0
+	for i := 0; i < 128; i++ {
+		if limiter.TryAcquireAdmission(identity, addr) {
+			accepted++
+			limiter.Release(identity, addr)
+		}
+	}
+	if accepted != limiter.maxPerPassword {
+		t.Fatalf("temporary handshake burst = %d, want %d", accepted, limiter.maxPerPassword)
+	}
+	if !limiter.TryAcquire(wrapIdentity{Password: "owner", IsMain: true}, addr) {
+		t.Fatal("temporary handshake flood blocked the owner identity")
 	}
 }
 

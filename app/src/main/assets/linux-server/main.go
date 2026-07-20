@@ -137,7 +137,7 @@ func main() {
 		log.Fatalf("[DTLS] создание сертификата: %v", err)
 	}
 	connectionLimit := newConnectionLimiter(*maxConnections, *handshakeRate)
-	identityLimit := newIdentityConnectionLimiter(*maxConnections)
+	identityLimit := newIdentityConnectionLimiter(*maxConnections, *handshakeRate)
 
 	if v := strings.TrimSpace(*dnsFlag); v != "" {
 		dns = v
@@ -219,7 +219,9 @@ func main() {
 	log.Printf("   DTLS: %s | WG: %s | NAT: %s", *listen, wgEndpoint, natType)
 	log.Printf("   WRAP: password HKDF + RTP AEAD | keys: %d", serverWrapKeys.Count())
 	log.Printf("   LIMITS: connections=%d | handshakes=%d/s", *maxConnections, *handshakeRate)
-	log.Printf("   TEMP LIMITS: total=%d | per-password=%d | per-IP=%d", identityLimit.maxGeneratedTotal, identityLimit.maxPerPassword, identityLimit.maxPerSourceIP)
+	log.Printf("   TEMP LIMITS: total=%d | per-password=%d | per-IP=%d | handshakes=%.1f/s | per-password=%.1f/s",
+		identityLimit.maxGeneratedTotal, identityLimit.maxPerPassword, identityLimit.maxPerSourceIP,
+		identityLimit.generatedRate, identityLimit.perPasswordRate)
 	log.Println("[SERVER] Готов")
 
 	for {
@@ -236,17 +238,36 @@ func main() {
 			}
 			continue
 		}
-		if !connectionLimit.TryAcquire() {
+		identity, ok := wrapListener.IdentityFor(dtlsConn.RemoteAddr())
+		if !ok {
 			atomic.AddInt64(&rejectedConns, 1)
 			dtlsConn.Close()
 			continue
 		}
+		if state := getPasswordAccessState(identity.Password, identity.IsMain); !state.IsActive() {
+			atomic.AddInt64(&rejectedConns, 1)
+			dtlsConn.Close()
+			continue
+		}
+		if !identityLimit.TryAcquireAdmission(identity, dtlsConn.RemoteAddr()) {
+			atomic.AddInt64(&rejectedConns, 1)
+			dtlsConn.Close()
+			continue
+		}
+		if !connectionLimit.TryAcquire() {
+			atomic.AddInt64(&rejectedConns, 1)
+			identityLimit.Release(identity, dtlsConn.RemoteAddr())
+			dtlsConn.Close()
+			continue
+		}
 		workers.Add(1)
-		go func(c net.Conn) {
+		remoteAddr := dtlsConn.RemoteAddr()
+		go func(c net.Conn, admittedIdentity wrapIdentity, admittedAddr net.Addr) {
 			defer workers.Done()
 			defer connectionLimit.Release()
+			defer identityLimit.Release(admittedIdentity, admittedAddr)
 			defer c.Close()
-			handleConn(ctx, c, wrapListener, identityLimit, wgEndpoint, wgDev, keys)
-		}(dtlsConn)
+			handleConn(ctx, c, admittedIdentity, wgEndpoint, wgDev, keys)
+		}(dtlsConn, identity, remoteAddr)
 	}
 }
