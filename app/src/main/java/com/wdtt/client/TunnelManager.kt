@@ -799,6 +799,7 @@ object TunnelManager {
     private fun killProcess() {
         watchdogJob?.cancel()
         readerJob?.cancel()
+        activeWorkers.value = 0
         val proc = process
         process = null
         if (proc != null) {

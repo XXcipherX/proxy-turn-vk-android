@@ -12,7 +12,6 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -28,10 +27,10 @@ import kotlinx.coroutines.launch
 
 private const val TUNNEL_NOTIFICATION_CHANNEL_ID = "wdtt_tunnel_v4"
 private const val TUNNEL_NOTIFICATION_ID = 1
+private const val CONNECTION_WAKE_LOCK_TIMEOUT_MS = 3 * 60 * 1000L
 
 class TunnelService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
     private var updateJob: Job? = null
     private var lastNotificationText: String? = null
     
@@ -41,12 +40,11 @@ class TunnelService : Service() {
     private var lastNetworkChangeTime = 0L
     private val activeNetworks = mutableSetOf<Network>()
     private var isTunnelPaused = false
+    private var hadActiveWorkers = false
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        
-        acquireWakeLock()
         setupNetworkCallback()
     }
 
@@ -92,6 +90,7 @@ class TunnelService : Service() {
     private fun restoreTunnel() {
         val notification = createNotification("Восстановление соединения...")
         startPersistentForeground(notification)
+        beginConnectionWakeWindow()
         
         val appContext = applicationContext
         TunnelManager.scope.launch {
@@ -140,8 +139,7 @@ class TunnelService : Service() {
 
     private fun startTunnel(params: TunnelParams) {
         updateNotification("Подключение...")
-        acquireWakeLock()
-        acquireWifiLock()
+        beginConnectionWakeWindow()
 
         
         
@@ -158,8 +156,8 @@ class TunnelService : Service() {
         CaptchaWebViewManager.onTunnelStop()
 
         TunnelManager.stop()
+        hadActiveWorkers = false
         releaseWakeLock()
-        releaseWifiLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -177,6 +175,7 @@ class TunnelService : Service() {
                     if (isTunnelPaused) {
                         isTunnelPaused = false
                         Log.d("TunnelService", "Сеть появилась, возобновляем туннель")
+                        beginConnectionWakeWindow()
                         TunnelManager.resume()
                         updateNotification("Подключение...")
                     } else {
@@ -194,6 +193,8 @@ class TunnelService : Service() {
                     isTunnelPaused = true
                     Log.d("TunnelService", "Сеть потеряна, приостанавливаем туннель")
                     TunnelManager.pause()
+                    hadActiveWorkers = false
+                    releaseWakeLock()
                     updateNotification("Ожидание сети (Фоновый сон)")
                 }
             }
@@ -216,6 +217,7 @@ class TunnelService : Service() {
 
         if (TunnelManager.running.value && !isTunnelPaused) {
             Log.d("TunnelService", "Сеть изменилась, мягкий перезапуск Go-клиента")
+            beginConnectionWakeWindow()
             TunnelManager.restartTransport()
         }
     }
@@ -236,49 +238,66 @@ class TunnelService : Service() {
         }
     }
 
+    private fun beginConnectionWakeWindow() {
+        hadActiveWorkers = false
+        acquireWakeLock()
+    }
+
+    @Synchronized
     private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
-        val pm = getSystemService(POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            "wdtt:tunnel_cpu"
-        ).apply { 
-            setReferenceCounted(false)
-            acquire() 
+        val lock = wakeLock ?: run {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "wdtt:tunnel_connect"
+            ).apply {
+                setReferenceCounted(false)
+            }.also { wakeLock = it }
+        }
+
+        try {
+            if (lock.isHeld) {
+                lock.release()
+            }
+            lock.acquire(CONNECTION_WAKE_LOCK_TIMEOUT_MS)
+            Log.d("TunnelService", "CPU wake lock acquired for connection recovery window")
+        } catch (e: RuntimeException) {
+            wakeLock = null
+            Log.w("TunnelService", "Failed to acquire connection wake lock", e)
         }
     }
 
-    @Suppress("DEPRECATION")
-    private fun acquireWifiLock() {
-        if (wifiLock?.isHeld == true) return
-        val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
-        
-        
-        
-        val mode = if (Build.VERSION.SDK_INT >= 29) {
-            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-        } else {
-            WifiManager.WIFI_MODE_FULL_HIGH_PERF
-        }
-        
-        wifiLock = wm.createWifiLock(mode, "wdtt:wifi_perf").apply { 
-            setReferenceCounted(false)
-            acquire() 
-        }
-    }
-
+    @Synchronized
     private fun releaseWakeLock() {
-        if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
+        val lock = wakeLock ?: return
+        try {
+            if (lock.isHeld) {
+                lock.release()
+                Log.d("TunnelService", "CPU wake lock released")
+            }
+        } catch (e: RuntimeException) {
+            Log.w("TunnelService", "Failed to release connection wake lock", e)
         }
         wakeLock = null
     }
 
-    private fun releaseWifiLock() {
-        if (wifiLock?.isHeld == true) {
-            wifiLock?.release()
+    private fun updateConnectionPowerState() {
+        if (!TunnelManager.running.value || isTunnelPaused) {
+            hadActiveWorkers = false
+            releaseWakeLock()
+            return
         }
-        wifiLock = null
+
+        if (TunnelManager.activeWorkers.value > 0) {
+            hadActiveWorkers = true
+            releaseWakeLock()
+            return
+        }
+
+        if (hadActiveWorkers) {
+            hadActiveWorkers = false
+            acquireWakeLock()
+        }
     }
 
     private fun startStatsUpdater() {
@@ -297,6 +316,7 @@ class TunnelService : Service() {
                     stopSelf()
                     break
                 }
+                updateConnectionPowerState()
                 if (TunnelManager.running.value && !isTunnelPaused) {
                     val helper = WireGuardHelper(applicationContext)
                     when (helper.watchdogState()) {
