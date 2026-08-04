@@ -49,4 +49,4 @@ jobs:
         run: sdkmanager "platforms;android-${ANDROID_COMPILE_SDK}" "build-tools;${ANDROID_BUILD_TOOLS}"
 
       - name: Generate and submit Gradle dependency graph
-        uses: gradle/actions/dependency-submission@v6
+        uses: gradle/actions/dependency-submission@v6.2.0
