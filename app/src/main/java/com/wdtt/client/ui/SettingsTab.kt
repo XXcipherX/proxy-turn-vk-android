@@ -111,7 +111,6 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
         }
     }
 
-    val activeFingerprint by settingsStore.selectedFingerprint.collectAsStateWithLifecycle(initialValue = "firefox")
     val activeClientIds by settingsStore.activeClientIds.collectAsStateWithLifecycle(initialValue = "8202606,6287487")
     val savedObfsMode by settingsStore.obfsMode.collectAsStateWithLifecycle(initialValue = "audio")
 
@@ -341,7 +340,6 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
             putExtra("vk_auth_mode", effectiveVkAuthMode)
             putExtra("captcha_mode", effectiveCaptchaMode)
             putExtra("captcha_solve_method", effectiveCaptchaSolveMethod)
-            putExtra("fingerprint", activeFingerprint)
             putExtra("client_ids", activeClientIds)
             putExtra("obfs_mode", obfsMode)
             putExtra("free_turn", connectionProfile?.mode?.name == "WRAP_S")

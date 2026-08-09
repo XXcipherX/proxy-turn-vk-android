@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	fhttp "github.com/bogdanfinn/fhttp"
+)
 
 func TestCaptchaDomainFromRedirectURI(t *testing.T) {
 	tests := []struct {
@@ -29,5 +34,23 @@ func TestVKMigrationConstants(t *testing.T) {
 	}
 	if vkCallJoinBase != "https://vk.ru/call/join/" {
 		t.Fatalf("vkCallJoinBase = %q", vkCallJoinBase)
+	}
+}
+
+func TestChrome146BrowserHeadersAreConsistent(t *testing.T) {
+	req, err := fhttp.NewRequest("GET", "https://vk.ru", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	applyBrowserProfileFhttp(req, chrome146Profile)
+
+	if got := req.Header.Get("User-Agent"); got != chrome146Profile.UserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, chrome146Profile.UserAgent)
+	}
+	if !strings.Contains(req.Header.Get("User-Agent"), "Chrome/146.") {
+		t.Fatalf("User-Agent does not identify Chrome 146: %q", req.Header.Get("User-Agent"))
+	}
+	if !strings.Contains(req.Header.Get("sec-ch-ua"), `v="146"`) {
+		t.Fatalf("sec-ch-ua does not identify version 146: %q", req.Header.Get("sec-ch-ua"))
 	}
 }

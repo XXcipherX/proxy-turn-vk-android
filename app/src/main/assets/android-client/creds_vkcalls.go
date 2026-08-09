@@ -24,13 +24,6 @@ const (
 	vkCallsAnonAPIVersion = "5.276"
 )
 
-var vkCallsProfile = Profile{
-	UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-	SecChUa:         `"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"`,
-	SecChUaMobile:   "?0",
-	SecChUaPlatform: `"Windows"`,
-}
-
 type vkCallsFailureKind string
 
 const (
@@ -134,7 +127,7 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 
 	deviceID := uuid.New().String()
 	name := generateName()
-	profile := vkCallsProfile
+	profile := chrome146Profile
 	linkURL := neturl.QueryEscape(vkCallJoinBase + link)
 	nameEnc := neturl.QueryEscape(name)
 

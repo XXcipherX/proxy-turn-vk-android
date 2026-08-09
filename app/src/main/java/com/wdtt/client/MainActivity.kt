@@ -120,7 +120,6 @@ class MainActivity : ComponentActivity() {
             val themeMode by settingsStore.themeMode.collectAsStateWithLifecycle(initialValue = "system")
             val isDynamicColor by settingsStore.isDynamicColor.collectAsStateWithLifecycle(initialValue = false)
             val themePalette by settingsStore.themePalette.collectAsStateWithLifecycle(initialValue = "indigo")
-            val activeFingerprint by settingsStore.selectedFingerprint.collectAsStateWithLifecycle(initialValue = "firefox")
             val activeClientIds by settingsStore.activeClientIds.collectAsStateWithLifecycle(initialValue = "8202606,6287487")
             val scope = rememberCoroutineScope()
 
@@ -140,10 +139,6 @@ class MainActivity : ComponentActivity() {
                     currentPalette = themePalette,
                     onPaletteChange = { palette ->
                         scope.launch { settingsStore.saveThemePalette(palette) }
-                    },
-                    activeFingerprint = activeFingerprint,
-                    onFingerprintChange = { fp ->
-                        scope.launch { settingsStore.saveFingerprint(fp) }
                     },
                     activeClientIds = activeClientIds,
                     onClientIdsChange = { ids ->
@@ -220,8 +215,6 @@ fun MainScreen(
     onDynamicColorChange: (Boolean) -> Unit = {},
     currentPalette: String = "indigo",
     onPaletteChange: (String) -> Unit = {},
-    activeFingerprint: String = "chrome",
-    onFingerprintChange: (String) -> Unit = {},
     activeClientIds: String = "8202606,6287487",
     onClientIdsChange: (String) -> Unit = {}
 ) {
@@ -407,8 +400,6 @@ fun MainScreen(
             onDynamicColorChange = onDynamicColorChange,
             currentPalette = currentPalette,
             onPaletteChange = onPaletteChange,
-            activeFingerprint = activeFingerprint,
-            onFingerprintChange = onFingerprintChange,
             activeClientIds = activeClientIds,
             onClientIdsChange = onClientIdsChange
         )

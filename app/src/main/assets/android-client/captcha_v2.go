@@ -613,7 +613,7 @@ func captchaV2StringifyAny(value any) string {
 }
 
 func applyBrowserProfileFhttp(req *fhttp.Request, profile Profile) {
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", profile.UserAgent)
 	req.Header.Set("sec-ch-ua", profile.SecChUa)
 	req.Header.Set("sec-ch-ua-mobile", profile.SecChUaMobile)
 	req.Header.Set("sec-ch-ua-platform", profile.SecChUaPlatform)

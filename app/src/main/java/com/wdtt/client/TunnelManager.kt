@@ -264,11 +264,6 @@ object TunnelManager {
                     "-listen", "127.0.0.1:${params.port}"
                 )
 
-                if (params.fingerprint.isNotEmpty()) {
-                    cmd.add("-fingerprint")
-                    cmd.add(params.fingerprint)
-                }
-
                 if (params.clientIds.isNotEmpty()) {
                     cmd.add("-client-ids")
                     cmd.add(params.clientIds)
@@ -991,7 +986,6 @@ data class TunnelParams(
     val vkAuthMode: String = "vkcalls",
     val captchaMode: String = "auto",
     val captchaSolveMethod: String = "auto",
-    val fingerprint: String = "firefox",
     val clientIds: String = "8202606,6287487",
     val obfsMode: String = "audio",
     val isFreeTurn: Boolean = false,

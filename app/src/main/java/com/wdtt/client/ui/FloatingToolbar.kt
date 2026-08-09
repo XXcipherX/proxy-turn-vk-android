@@ -57,8 +57,6 @@ fun FloatingToolbar(
     onDynamicColorChange: (Boolean) -> Unit,
     currentPalette: String,
     onPaletteChange: (String) -> Unit,
-    activeFingerprint: String,
-    onFingerprintChange: (String) -> Unit,
     activeClientIds: String,
     onClientIdsChange: (String) -> Unit,
     modifier: Modifier = Modifier
@@ -308,54 +306,6 @@ fun FloatingToolbar(
                                 PaletteCircle("espresso", 0xFF6D4C41, currentPalette, onPaletteChange)
                             }
                             Spacer(modifier = Modifier.height(6.dp))
-                        }
-                    }
-
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                    )
-
-                    Text(
-                        "Отпечаток",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
-                    )
-
-                    val fingerprints = listOf("chrome", "safari", "firefox")
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        fingerprints.forEach { fp ->
-                            val selected = fp == activeFingerprint
-                            Surface(
-                                onClick = { onFingerprintChange(fp) },
-                                shape = RoundedCornerShape(8.dp),
-                                color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Box(
-                                    modifier = Modifier.padding(vertical = 10.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    val fpName = when(fp) {
-                                        "chrome" -> "Chrome"
-                                        "safari" -> "Safari"
-                                        "firefox" -> "FireFox"
-                                        else -> fp.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
-                                    }
-                                    Text(
-                                        text = fpName,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                        fontSize = 11.sp
-                                    )
-                                }
-                            }
                         }
                     }
 

@@ -163,7 +163,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
             putExtra("vk_auth_mode", store.vkAuthMode.first())
             putExtra("captcha_mode", store.captchaMode.first())
             putExtra("captcha_solve_method", store.captchaSolveMethod.first())
-            putExtra("fingerprint", store.selectedFingerprint.first())
             putExtra("client_ids", store.activeClientIds.first())
             putExtra("obfs_mode", store.obfsMode.first())
             putExtra("free_turn", isFreeTurn)

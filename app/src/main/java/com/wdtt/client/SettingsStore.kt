@@ -76,7 +76,6 @@ class SettingsStore(context: Context) {
         private val THEME_PALETTE = stringPreferencesKey("theme_palette")
 
         
-        private val SELECTED_FINGERPRINT = stringPreferencesKey("selected_fingerprint")
         private val ACTIVE_CLIENT_IDS = stringPreferencesKey("active_client_ids")
 
         private val UPDATE_LAST_CHECK_AT = longPreferencesKey("update_last_check_at")
@@ -98,7 +97,7 @@ class SettingsStore(context: Context) {
             val newName = "${baseKey.name}_$profile"
             @Suppress("UNCHECKED_CAST")
             return when (baseKey) {
-                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, WDTT_LINK, CONNECTION_PROFILES_ENCRYPTED, ACTIVE_CONNECTION_PROFILE_ID, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS -> stringPreferencesKey(newName) as Preferences.Key<T>
+                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, WDTT_LINK, CONNECTION_PROFILES_ENCRYPTED, ACTIVE_CONNECTION_PROFILE_ID, ACTIVE_CLIENT_IDS -> stringPreferencesKey(newName) as Preferences.Key<T>
                 WORKERS_PER_HASH, LISTEN_PORT, SERVER_DTLS_PORT, SERVER_WG_PORT, PROXY_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
                 MANUAL_PORTS_ENABLED, NO_DTLS, NO_DNS, IS_WHITELIST, WDTT_LINK_MODE, DETAILED_LOGS -> booleanPreferencesKey(newName) as Preferences.Key<T>
                 else -> throw IllegalArgumentException("Unsupported key type: ${baseKey.name}")
@@ -253,10 +252,6 @@ class SettingsStore(context: Context) {
     val themePalette: Flow<String> = dataStore.data.map { it[THEME_PALETTE] ?: "indigo" }
 
     
-    val selectedFingerprint: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(SELECTED_FINGERPRINT, profile)] ?: "firefox"
-    }
     val activeClientIds: Flow<String> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(ACTIVE_CLIENT_IDS, profile)] ?: "8202606,6287487"
@@ -292,13 +287,6 @@ class SettingsStore(context: Context) {
     suspend fun saveThemePalette(palette: String) {
         dataStore.edit { prefs ->
             prefs[THEME_PALETTE] = palette
-        }
-    }
-
-    suspend fun saveFingerprint(fingerprint: String) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(SELECTED_FINGERPRINT, profile)] = fingerprint
         }
     }
 

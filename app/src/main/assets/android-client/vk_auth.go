@@ -431,7 +431,7 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 }
 
 func getTokenChain(ctx context.Context, link string, streamID int, creds VKCredentials, jar tlsclient.CookieJar) (string, string, []string, error) {
-	profile := getRandomProfile()
+	profile := chrome146Profile
 
 	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
 		tlsclient.WithTimeoutSeconds(20),
