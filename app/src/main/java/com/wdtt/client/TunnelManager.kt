@@ -229,7 +229,7 @@ object TunnelManager {
                     .split(Regex("[,\\s\\n]+"))
                     .map { it.trim() }
                     .filter { it.isNotEmpty() }
-                    .take(3)
+                    .take(4)
 
                 if (hashList.isEmpty()) {
                     updateLog("hash_error", "Ошибка: Хеш не указан", 99, true)
@@ -242,7 +242,7 @@ object TunnelManager {
                     return@launch
                 }
 
-                val hashCount = hashList.size.coerceIn(1, 3)
+                val hashCount = hashList.size.coerceIn(1, 4)
                 val totalWorkers = params.workersPerHash.coerceIn(1, 128)
                 
                 val hashMode = if (activeHashIndex == 0) "Основной" else "Запасной"
