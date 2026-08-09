@@ -187,7 +187,8 @@ func WorkerGroup(
 					}
 
 					if strings.Contains(errStr, "хеш мёртв") ||
-						strings.Contains(errStr, "FATAL_AUTH") {
+						strings.Contains(errStr, "FATAL_AUTH") ||
+						strings.Contains(errStr, "FATAL_LIFECYCLE") {
 						log.Printf("[ВОРКЕР #%d] Фатальная ошибка: %s", wid, errStr)
 						return
 					}
@@ -274,14 +275,15 @@ func normalizeVKJoinHash(input string) string {
 }
 
 type TurnParams struct {
-	Host     string
-	Port     string
-	Hashes   []string
-	WrapKey  []byte
-	ObfsMode string
-	UseWrapS bool
-	ObfProfile string
-	ClientID string
+	Host         string
+	Port         string
+	Hashes       []string
+	WrapKey      []byte
+	ObfsMode     string
+	UseWrapS     bool
+	ObfProfile   string
+	ClientID     string
+	GenerationID string
 }
 
 type Credentials struct {

@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 var CaptchaResultChan = make(chan string, 1)
@@ -226,15 +228,20 @@ func main() {
 	}
 	*numW = (*numW / workersPerGroup) * workersPerGroup
 
+	generationID := ""
+	if !*useWrapS {
+		generationID = uuid.NewString()
+	}
 	tp := &TurnParams{
-		Host:     *host,
-		Port:     *port,
-		Hashes:   hashes,
-		WrapKey:  wrapKey,
-		ObfsMode: *obfsMode,
-		UseWrapS: *useWrapS,
-		ObfProfile: *freeObfProfile,
-		ClientID: *freeClientID,
+		Host:         *host,
+		Port:         *port,
+		Hashes:       hashes,
+		WrapKey:      wrapKey,
+		ObfsMode:     *obfsMode,
+		UseWrapS:     *useWrapS,
+		ObfProfile:   *freeObfProfile,
+		ClientID:     *freeClientID,
+		GenerationID: generationID,
 	}
 
 	var localConn net.PacketConn
@@ -298,6 +305,7 @@ func main() {
 		log.Printf("[WRAP-S] Free Turn profile=%s, Client ID активен", *freeObfProfile)
 	} else {
 		log.Printf("[WRAP] Ключ выведен из пароля, режим RTP AEAD активен")
+		log.Printf("[LIFECYCLE] Поколение воркеров: %s", generationID)
 	}
 	log.Printf("[КЛИЕНТ] Device ID: %s", *deviceID)
 	log.Printf("[КЛИЕНТ] Captcha: %s", captchaStatus)

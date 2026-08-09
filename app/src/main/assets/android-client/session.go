@@ -300,15 +300,15 @@ func RunSession(
 	stats.ActiveConnections.Add(1)
 	defer stats.ActiveConnections.Add(-1)
 
-	if getConfig && configCh != nil {
-		conf, confErr := RequestConfig(dtlsConn, localPort, deviceID, password)
+	if !tp.UseWrapS {
+		conf, confErr := RequestConfig(dtlsConn, localPort, deviceID, password, tp.GenerationID, fmt.Sprintf("%d", sessionID))
 		if confErr != nil {
 			errStr := confErr.Error()
-			if strings.Contains(errStr, "FATAL_AUTH") {
+			if strings.Contains(errStr, "FATAL_AUTH") || strings.Contains(errStr, "FATAL_LIFECYCLE") {
 				return false, confErr
 			}
 			log.Printf("[ВОРКЕР #%d] Ошибка конфига: %v", sessionID, confErr)
-		} else if conf != "" {
+		} else if conf != "" && getConfig && configCh != nil {
 			select {
 			case configCh <- conf:
 				configDelivered = true
@@ -317,7 +317,7 @@ func RunSession(
 				configDelivered = true
 				log.Printf("[ВОРКЕР #%d] Конфиг уже был доставлен другим воркером", sessionID)
 			}
-		} else {
+		} else if conf == "" && getConfig {
 			log.Printf("[ВОРКЕР #%d] Сервер ещё не выдал WireGuard-конфиг, повторим позже", sessionID)
 		}
 	}

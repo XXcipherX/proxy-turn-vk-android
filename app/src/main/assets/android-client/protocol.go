@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-func RequestConfig(conn net.Conn, localPort, deviceID, password string) (string, error) {
-	payload := fmt.Sprintf("GETCONF:%s|%s|%s", localPort, deviceID, password)
+func RequestConfig(conn net.Conn, localPort, deviceID, password, generationID, workerID string) (string, error) {
+	payload := fmt.Sprintf("GETCONF:%s|%s|%s|%s|%s", localPort, deviceID, password, generationID, workerID)
 	if _, err := conn.Write([]byte(payload)); err != nil {
 		return "", fmt.Errorf("отправка GETCONF: %w", err)
 	}
@@ -37,6 +37,8 @@ func RequestConfig(conn net.Conn, localPort, deviceID, password string) (string,
 			return "", fmt.Errorf("FATAL_AUTH: срок действия пароля истёк")
 		case "device_mismatch":
 			return "", fmt.Errorf("FATAL_AUTH: пароль привязан к другому устройству")
+		case "stale_generation":
+			return "", fmt.Errorf("FATAL_LIFECYCLE: сервер отклонил устаревшее поколение воркеров")
 		default:
 			return "", fmt.Errorf("FATAL_AUTH: доступ запрещён (%s)", reason)
 		}
