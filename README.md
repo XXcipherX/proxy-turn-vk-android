@@ -2,8 +2,8 @@
   
   # WDTT — WireGuard over TURN Tunnel
 <br>
-  <img src="https://img.shields.io/badge/Android-SDK_29--35-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android SDK">
-  <img src="https://img.shields.io/badge/Go-1.25-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go Version">
+  <img src="https://img.shields.io/badge/Android-API_28--35-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android API">
+  <img src="https://img.shields.io/badge/Go-1.26-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go Version">
   <img src="https://img.shields.io/badge/Kotlin-Compose-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white" alt="Kotlin">
   <a href="https://github.com/XXcipherX/proxy-turn-vk-android/stargazers">
     <img src="https://img.shields.io/github/stars/XXcipherX/proxy-turn-vk-android?style=for-the-badge&logo=github&color=ffca28&labelColor=24292e" alt="Stars">
@@ -27,7 +27,7 @@
 
 - [Как это работает](#как-это-работает)
 - [Быстрый старт](#быстрый-старт)
-- [Что нового в версии 1.2.3](#что-нового-в-версии-123)
+- [Текущая версия 2.0.0](#текущая-версия-200)
 - [Возможности Android-версии](#возможности-android-версии)
 
 ### 2. Настройка сервера (Техническая часть)
@@ -87,21 +87,12 @@
 
 *(Я не несу ответвености за ваше использование сторонних клиентов совместимых с WDTT)*
 
-## Что нового в версии 1.2.3
+## Текущая версия 2.0.0
 
-**Новое:**
-
-- Добавлен новый тип маскировки "Видео" для разнообразия скрытности трафика.
-- Реализован режим анонимного потока VK Calls без капчи. #218 @XXcipherX
-
-**Исправления и оптимизация:**
-
-- Исправлена нестабильность на 32-битных Android-устройствах (падения из-за атомарных операций). #217 @XXcipherX
-- Cнижена нагрузка на сервер за счёт оптимизации выделения памяти при обфускации RTP #214 @annel0
-- Исправлена логика раздельного туннелирования — теперь работает корректно #223 @XXcipherX
-- Улучшена обработка ошибок VK Calls: неустранимые ошибки теперь не приводят к бесконечным повторным попыткам #227 @XXcipherX
-- Мелкие улучшения капчи и скриптов сборки #221 @Afteroid
-- Мелкие улучшения сборочных скриптов и DNS #190 @andbul
+Исходная версия Android-приложения — `2.0.0`. Релизный workflow добавляет номер
+запуска и публикует согласованные `versionName` и tag вида
+`2.0.0.<номер>` / `v2.0.0.<номер>`. Список изменений конкретной сборки находится
+на [странице релизов](https://github.com/XXcipherX/proxy-turn-vk-android/releases).
 
 ## Другие рабочие решения
 
@@ -238,7 +229,7 @@ WDTT-сервер поддерживает две модели подключе�
 
 ```bash
 export ANDROID_NDK_HOME=/path/to/android-ndk
-./scripts/build-native-libs.sh
+./scripts/build_client.sh
 ./gradlew :app:assembleDebug
 ```
 
