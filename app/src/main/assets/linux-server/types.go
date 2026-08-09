@@ -13,8 +13,9 @@ const (
 	wgMTU                 = 1280
 	keepalive             = 25
 	dtlsHandshakeTimeout  = 15 * time.Second
-	defaultRelayIdleTime  = 3 * time.Minute
-	defaultLegacyConnCap  = 64
+	defaultLegacyRelayIdleTime = 3 * time.Minute
+	defaultV2RelayIdleTime     = 30 * time.Minute
+	defaultLegacyConnCap       = 64
 )
 
 var dns = "1.1.1.1"

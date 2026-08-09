@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -127,6 +128,20 @@ func TestRelayKeepaliveRecognition(t *testing.T) {
 				t.Fatalf("isRelayKeepalive(%x) = %v, want %v", tc.packet, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRelayIdleTimeoutSelection(t *testing.T) {
+	timeouts := relayIdleTimeouts{
+		legacy:      3 * time.Minute,
+		lifecycleV2: 30 * time.Minute,
+	}
+
+	if got := timeouts.forRequest(getConfRequest{}); got != timeouts.legacy {
+		t.Fatalf("legacy timeout = %s, want %s", got, timeouts.legacy)
+	}
+	if got := timeouts.forRequest(getConfRequest{GenerationID: "generation", WorkerID: "worker"}); got != timeouts.lifecycleV2 {
+		t.Fatalf("lifecycle v2 timeout = %s, want %s", got, timeouts.lifecycleV2)
 	}
 }
 

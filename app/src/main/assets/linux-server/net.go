@@ -801,6 +801,18 @@ func readRelayPacket(clientConn net.Conn, buf []byte, idleTimeout time.Duration)
 	}
 }
 
+type relayIdleTimeouts struct {
+	legacy      time.Duration
+	lifecycleV2 time.Duration
+}
+
+func (t relayIdleTimeouts) forRequest(request getConfRequest) time.Duration {
+	if request.IsLifecycleV2() {
+		return t.lifecycleV2
+	}
+	return t.legacy
+}
+
 func handleConn(
 	ctx context.Context,
 	clientConn net.Conn,
@@ -809,7 +821,7 @@ func handleConn(
 	wgDev *device.Device,
 	keys *wgKeys,
 	lifecycleRegistry *relayLifecycleRegistry,
-	relayIdleTimeout time.Duration,
+	idleTimeouts relayIdleTimeouts,
 ) {
 	defer clientConn.Close()
 	connCtx, connCancel := context.WithCancel(ctx)
@@ -876,6 +888,7 @@ func handleConn(
 	}
 	firstStr := string(firstPacket)
 	var lifecycleRegistration *relayLifecycleRegistration
+	relayIdleTimeout := idleTimeouts.legacy
 
 	getConf, isGetConf, getConfErr := parseGetConfRequest(firstPacket)
 	if isGetConf {
@@ -884,6 +897,7 @@ func handleConn(
 			log.Printf("[WG] Отказ: некорректный GETCONF от %s: %v", clientConn.RemoteAddr(), getConfErr)
 			return
 		}
+		relayIdleTimeout = idleTimeouts.forRequest(getConf)
 		deviceID := getConf.DeviceID
 		password := getConf.Password
 
