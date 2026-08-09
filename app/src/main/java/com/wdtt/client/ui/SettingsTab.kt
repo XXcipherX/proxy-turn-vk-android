@@ -166,7 +166,6 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     val combinedHashes = remember(vkHash1, vkHash2, vkHash3, vkHash4) { uniqueHashes.joinToString(",") }
     val dynamicMaxWorkers = remember(filledHashCount) { (filledHashCount.coerceAtLeast(1) * 27).toFloat() }
     var portInput by rememberSaveable { mutableStateOf("9000") }
-    var sniInput by rememberSaveable { mutableStateOf("") }
 
     LaunchedEffect(dynamicMaxWorkers, wdttLinkMode) {
         if (!wdttLinkMode && workersInput > dynamicMaxWorkers) {
@@ -223,7 +222,6 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
         val manualPorts = settingsStore.manualPortsEnabled.first()
         val serverDtlsPort = settingsStore.serverDtlsPort.first()
         val serverWgPort = settingsStore.serverWgPort.first()
-        val sni = settingsStore.sni.first()
         val vkAuthMode = settingsStore.vkAuthMode.first()
         val captchaMode = settingsStore.captchaMode.first()
         val captchaMethod = settingsStore.captchaSolveMethod.first()
@@ -236,7 +234,6 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
         manualPortsEnabled = manualPorts
         serverDtlsPortInput = serverDtlsPort.toString()
         serverWgPortInput = serverWgPort.toString()
-        sniInput = sni
         useVKCallsAuth = vkAuthMode != "legacy"
         obfsMode = savedObfsMode
         autoCaptchaEnabled = captchaMode == "auto"
@@ -278,8 +275,11 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
         scope.launch {
             val savedLocalPort = if (manualPortsEnabled) portInput.toIntOrNull()?.coerceIn(1, 65535) ?: 9000 else 9000
             settingsStore.save(
-                peerInput, hashes, "",
-                workersInput.toInt(), "udp", savedLocalPort, sniInput, false
+                peer = peerInput,
+                vkHashes = hashes,
+                secondaryVkHash = "",
+                workersPerHash = workersInput.toInt(),
+                listenPort = savedLocalPort
             )
             onSaved?.invoke()
         }
@@ -291,8 +291,11 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
             delay(300)
             val savedLocalPort = if (manualPortsEnabled) portInput.toIntOrNull()?.coerceIn(1, 65535) ?: 9000 else 9000
             settingsStore.save(
-                peerInput, combinedHashes, "",
-                workersInput.toInt(), "udp", savedLocalPort, sniInput, false
+                peer = peerInput,
+                vkHashes = combinedHashes,
+                secondaryVkHash = "",
+                workersPerHash = workersInput.toInt(),
+                listenPort = savedLocalPort
             )
         }
     }
@@ -315,8 +318,11 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
         saveJob?.cancel()
         scope.launch {
             settingsStore.save(
-                peerInput, combinedHashes, "",
-                workersInput.toInt(), "udp", effectiveLocalPort, sniInput, false
+                peer = peerInput,
+                vkHashes = combinedHashes,
+                secondaryVkHash = "",
+                workersPerHash = workersInput.toInt(),
+                listenPort = effectiveLocalPort
             )
             settingsStore.saveVkAuthMode(effectiveVkAuthMode)
             settingsStore.saveCaptchaMode(effectiveCaptchaMode)
@@ -336,7 +342,6 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
             putExtra("secondary_vk_hash", "")
             putExtra("workers_per_hash", connectionProfile?.workers ?: workersInput.toInt())
             putExtra("port", finalLocalPort)
-            putExtra("sni", sniInput)
             putExtra("connection_password", finalPassword)
             putExtra("vk_auth_mode", effectiveVkAuthMode)
             putExtra("captcha_mode", effectiveCaptchaMode)

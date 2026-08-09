@@ -57,7 +57,6 @@ object TunnelManager {
     private var activeHashIndex = 0 
     private var currentParams: TunnelParams? = null
     private var lastContext: Context? = null
-    private var forceRegenerateUA = false 
     private var currentCaptchaMode = "wv" 
     private var currentCaptchaSolveMethod = "auto" 
     private var staticWireGuardStarted = false
@@ -214,7 +213,6 @@ object TunnelManager {
                     activeHashIndex = 0
                     currentParams = params
                     lastContext = appContext
-                    forceRegenerateUA = false
                     currentCaptchaMode = params.captchaMode
                     currentCaptchaSolveMethod = params.captchaSolveMethod
                     staticWireGuardStarted = false
@@ -707,7 +705,6 @@ object TunnelManager {
         val context = lastContext ?: return
 
         currentHashErrorCount = 0
-        forceRegenerateUA = true
 
         if (params.secondaryVkHash.isNotEmpty() && activeHashIndex == 0) {
             updateLog("hash_switch", "Основной хеш мертв. Переключение на запасной...", 50, true)
@@ -730,7 +727,6 @@ object TunnelManager {
                 if (proc == null || !proc.isAlive) {
                     updateLog("watchdog", "⚠ Процесс упал. Перезапуск...", 50, true)
                     activeWorkers.value = 0
-                    forceRegenerateUA = true
                     killProcess()
                     delay(2000)
                     if (running.value) {
@@ -754,7 +750,6 @@ object TunnelManager {
                         return@launch
                     } else if (System.currentTimeMillis() - zeroWorkersSince > 90_000 && !ManlCaptchaWebViewManager.isCaptchaPending) {
                         updateLog("watchdog", "⚠ Зомби-процесс (0 воркеров 90с). Перезапуск...", 50, true)
-                        forceRegenerateUA = true
                         killProcess()
                         delay(2000)
                         if (running.value) {
@@ -985,9 +980,7 @@ data class TunnelParams(
     val secondaryVkHash: String = "",
     val workersPerHash: Int,
     val port: Int,
-    val sni: String = "",
     val connectionPassword: String = "",
-    val protocol: String = "udp",
     val vkAuthMode: String = "vkcalls",
     val captchaMode: String = "auto",
     val captchaSolveMethod: String = "auto",

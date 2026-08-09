@@ -35,31 +35,17 @@ class SettingsStore(context: Context) {
         private val VK_HASHES = stringPreferencesKey("vk_hashes")
         private val SECONDARY_VK_HASH = stringPreferencesKey("secondary_vk_hash")
         private val WORKERS_PER_HASH = intPreferencesKey("workers_per_hash")
-        private val PROTOCOL = stringPreferencesKey("protocol")
         private val LISTEN_PORT = intPreferencesKey("listen_port")
         private val MANUAL_PORTS_ENABLED = booleanPreferencesKey("manual_ports_enabled")
         private val SERVER_DTLS_PORT = intPreferencesKey("server_dtls_port")
         private val SERVER_WG_PORT = intPreferencesKey("server_wg_port")
-        private val SNI = stringPreferencesKey("sni")
         private val NO_DTLS = booleanPreferencesKey("no_dtls")
-        private val NO_DNS = booleanPreferencesKey("no_dns")
-
-        private val USER_AGENT = stringPreferencesKey("user_agent")
 
         private val EXCLUDED_APPS = stringPreferencesKey("excluded_apps")
-        
-        private val DETAILED_LOGS = booleanPreferencesKey("detailed_logs")
-        
-        
+
         private val CONNECTION_PASSWORD = stringPreferencesKey("connection_password")
         private val CONNECTION_PASSWORD_ENCRYPTED = stringPreferencesKey("connection_password_encrypted")
 
-        
-        private val PROXY_MODE = stringPreferencesKey("proxy_mode") 
-        private val PROXY_HOST = stringPreferencesKey("proxy_host")
-        private val PROXY_PORT = intPreferencesKey("proxy_port")
-
-        
         private val VK_AUTH_MODE = stringPreferencesKey("vk_auth_mode") 
         private val OBFS_MODE = stringPreferencesKey("obfs_mode") 
         private val CAPTCHA_MODE = stringPreferencesKey("captcha_mode") 
@@ -98,9 +84,9 @@ class SettingsStore(context: Context) {
             val newName = "${baseKey.name}_$profile"
             @Suppress("UNCHECKED_CAST")
             return when (baseKey) {
-                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, WDTT_LINK, CONNECTION_PROFILES_ENCRYPTED, ACTIVE_CONNECTION_PROFILE_ID, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS -> stringPreferencesKey(newName) as Preferences.Key<T>
-                WORKERS_PER_HASH, LISTEN_PORT, SERVER_DTLS_PORT, SERVER_WG_PORT, PROXY_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
-                MANUAL_PORTS_ENABLED, NO_DTLS, NO_DNS, IS_WHITELIST, WDTT_LINK_MODE, DETAILED_LOGS -> booleanPreferencesKey(newName) as Preferences.Key<T>
+                PEER, VK_HASHES, SECONDARY_VK_HASH, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, VK_AUTH_MODE, OBFS_MODE, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, WDTT_LINK, CONNECTION_PROFILES_ENCRYPTED, ACTIVE_CONNECTION_PROFILE_ID, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS -> stringPreferencesKey(newName) as Preferences.Key<T>
+                WORKERS_PER_HASH, LISTEN_PORT, SERVER_DTLS_PORT, SERVER_WG_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
+                MANUAL_PORTS_ENABLED, NO_DTLS, IS_WHITELIST, WDTT_LINK_MODE -> booleanPreferencesKey(newName) as Preferences.Key<T>
                 else -> throw IllegalArgumentException("Unsupported key type: ${baseKey.name}")
             }
         }
@@ -112,6 +98,7 @@ class SettingsStore(context: Context) {
     init {
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             purgeLegacyDeploySettings()
+            purgeRemovedTunnelSettings()
             migrateSecretsToKeystore()
             migrateLegacyWhitelistMode()
             migrateLegacyWdttLink()
@@ -155,10 +142,6 @@ class SettingsStore(context: Context) {
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: 16
     }
-    val protocol: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(PROTOCOL, profile)] ?: "udp"
-    }
     val listenPort: Flow<Int> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(LISTEN_PORT, profile)] ?: 9000
@@ -175,49 +158,17 @@ class SettingsStore(context: Context) {
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(SERVER_WG_PORT, profile)] ?: 56001
     }
-    val sni: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(SNI, profile)] ?: ""
-    }
-    val noDns: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(NO_DNS, profile)] ?: false
-    }
-    val userAgent: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(USER_AGENT, profile)] ?: ""
-    }
 
     val excludedApps: Flow<String> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(EXCLUDED_APPS, profile)] ?: ""
     }
-    
-    val detailedLogs: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(DETAILED_LOGS, profile)] ?: false
-    }
-    
-    
+
     val connectionPassword: Flow<String> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         readSecret(prefs, CONNECTION_PASSWORD_ENCRYPTED, CONNECTION_PASSWORD, profile)
     }
-    
-    val proxyMode: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(PROXY_MODE, profile)] ?: "tun"
-    }
-    val proxyHost: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(PROXY_HOST, profile)] ?: "127.0.0.1"
-    }
-    val proxyPort: Flow<Int> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(PROXY_PORT, profile)] ?: 1080
-    }
 
-    
     val vkAuthMode: Flow<String> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(VK_AUTH_MODE, profile)] ?: "vkcalls"
@@ -452,10 +403,7 @@ class SettingsStore(context: Context) {
         vkHashes: String,
         secondaryVkHash: String,
         workersPerHash: Int,
-        protocol: String,
-        listenPort: Int,
-        sni: String = "",
-        noDns: Boolean = false
+        listenPort: Int
     ) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
@@ -463,10 +411,7 @@ class SettingsStore(context: Context) {
             prefs[getProfileKey(VK_HASHES, profile)] = vkHashes
             prefs[getProfileKey(SECONDARY_VK_HASH, profile)] = secondaryVkHash
             prefs[getProfileKey(WORKERS_PER_HASH, profile)] = workersPerHash
-            prefs[getProfileKey(PROTOCOL, profile)] = protocol
             prefs[getProfileKey(LISTEN_PORT, profile)] = listenPort
-            prefs[getProfileKey(SNI, profile)] = sni
-            prefs[getProfileKey(NO_DNS, profile)] = noDns
         }
     }
 
@@ -486,13 +431,6 @@ class SettingsStore(context: Context) {
         }
     }
 
-    suspend fun saveUserAgent(ua: String) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(USER_AGENT, profile)] = ua
-        }
-    }
-
     suspend fun saveExcludedApps(packages: String) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
@@ -500,34 +438,13 @@ class SettingsStore(context: Context) {
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
         }
     }
-    
-    suspend fun saveDetailedLogs(enabled: Boolean) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(DETAILED_LOGS, profile)] = enabled
-        }
-    }
-    
-    
     suspend fun saveConnectionPassword(password: String) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
             prefs.putSecret(CONNECTION_PASSWORD_ENCRYPTED, CONNECTION_PASSWORD, password, profile)
         }
     }
-    
-    
-    
-    suspend fun saveProxyMode(mode: String, host: String, port: Int) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(PROXY_MODE, profile)] = mode
-            prefs[getProfileKey(PROXY_HOST, profile)] = host
-            prefs[getProfileKey(PROXY_PORT, profile)] = port
-        }
-    }
 
-    
     suspend fun saveVkAuthMode(mode: String) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
@@ -627,6 +544,19 @@ class SettingsStore(context: Context) {
                 for (name in names) {
                     prefs.remove(stringPreferencesKey(name + suffix))
                 }
+            }
+        }
+    }
+
+    private suspend fun purgeRemovedTunnelSettings() {
+        val stringNames = listOf("protocol", "sni", "user_agent", "proxy_mode", "proxy_host")
+        val booleanNames = listOf("no_dns", "detailed_logs")
+        dataStore.edit { prefs ->
+            for (profile in 0..2) {
+                val suffix = if (profile == 0) "" else "_$profile"
+                stringNames.forEach { prefs.remove(stringPreferencesKey(it + suffix)) }
+                booleanNames.forEach { prefs.remove(booleanPreferencesKey(it + suffix)) }
+                prefs.remove(intPreferencesKey("proxy_port$suffix"))
             }
         }
     }
