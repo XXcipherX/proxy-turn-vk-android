@@ -6,6 +6,23 @@
 version: 2
 
 updates:
+  # Go-зависимости Android-клиента
+  - package-ecosystem: "gomod"
+    directory: "/app/src/main/assets/android-client"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:10"
+      timezone: "Europe/Moscow"
+    open-pull-requests-limit: 10
+    groups:
+      android-go-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
   # Go-зависимости сервера
   - package-ecosystem: "gomod"
     directory: "/app/src/main/assets/linux-server"
