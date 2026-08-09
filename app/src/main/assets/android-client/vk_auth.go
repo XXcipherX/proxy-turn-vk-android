@@ -290,7 +290,7 @@ func handleAuthError(streamID int) bool {
 var globalCaptchaLockout atomic.Int64
 
 const (
-	captchaAutoWebViewTimeout     = 10 * time.Second
+	captchaAutoWebViewTimeout     = 25 * time.Second
 	captchaManualWebViewTimeout   = 60 * time.Second
 	captchaSelectedWebViewTimeout = 120 * time.Second
 )
@@ -677,30 +677,20 @@ func solveCaptchaBySelectedMode(
 	lastErr := solveErr
 	log.Printf("[STREAM %d] [КАПЧА] AUTO: Go v2 не решил за 2 попытки: %v", streamID, solveErr)
 
-	for wbvAttempt := 1; wbvAttempt <= 2; wbvAttempt++ {
-		log.Printf("[STREAM %d] [КАПЧА] AUTO: WBV Auto попытка %d/2 (timeout %s)", streamID, wbvAttempt, captchaAutoWebViewTimeout)
-		token, solveErr = requestWebViewCaptcha(streamID, captchaErr, "auto", captchaAutoWebViewTimeout)
-		if solveErr == nil {
-			log.Printf("[STREAM %d] [КАПЧА] AUTO: WBV Auto решил капчу", streamID)
-			return token, nil
-		}
-		if ctx.Err() != nil {
-			return "", solveErr
-		}
-		lastErr = solveErr
-		if isWebViewCaptchaTimeout(solveErr) {
-			log.Printf("[STREAM %d] [КАПЧА] AUTO: WBV Auto timeout %d/2", streamID, wbvAttempt)
-		} else {
-			log.Printf("[STREAM %d] [КАПЧА] AUTO: WBV Auto ошибка %d/2: %v", streamID, wbvAttempt, solveErr)
-		}
-
-		timer := time.NewTimer(time.Duration(250+rand.Intn(250)) * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return "", ctx.Err()
-		case <-timer.C:
-		}
+	log.Printf("[STREAM %d] [КАПЧА] AUTO: WBV Auto, одна попытка (timeout %s)", streamID, captchaAutoWebViewTimeout)
+	token, solveErr = requestWebViewCaptcha(streamID, captchaErr, "auto", captchaAutoWebViewTimeout)
+	if solveErr == nil {
+		log.Printf("[STREAM %d] [КАПЧА] AUTO: WBV Auto решил капчу", streamID)
+		return token, nil
+	}
+	if ctx.Err() != nil {
+		return "", solveErr
+	}
+	lastErr = solveErr
+	if isWebViewCaptchaTimeout(solveErr) {
+		log.Printf("[STREAM %d] [КАПЧА] AUTO: WBV Auto timeout", streamID)
+	} else {
+		log.Printf("[STREAM %d] [КАПЧА] AUTO: WBV Auto ошибка: %v", streamID, solveErr)
 	}
 
 	log.Printf("[STREAM %d] [КАПЧА] AUTO: финальная Go v2 попытка после WBV", streamID)

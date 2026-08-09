@@ -155,16 +155,8 @@ class ManlCaptchaActivity : ComponentActivity() {
                                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                                 ViewGroup.LayoutParams.MATCH_PARENT
                                             )
-                                            settings.apply {
-                                                javaScriptEnabled = true
-                                                domStorageEnabled = true
-                                                mediaPlaybackRequiresUserGesture = false
-                                                loadWithOverviewMode = true
-                                                useWideViewPort = true
-                                                blockNetworkLoads = false
-                                                cacheMode = WebSettings.LOAD_DEFAULT
-                                                userAgentString = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-                                            }
+                                            val userAgent = configureCaptchaWebView()
+                                            Log.d("ManlCaptchaWV", "System WebView UA: $userAgent")
 
                                             addJavascriptInterface(object {
                                                 @JavascriptInterface

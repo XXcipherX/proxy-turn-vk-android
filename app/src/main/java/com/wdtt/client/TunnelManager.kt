@@ -566,7 +566,7 @@ object TunnelManager {
                             val stableKey = when {
                                 text.contains("старт") -> "captcha_auto_1"
                                 text.contains("Go v2") && text.contains("2 попыт") -> "captcha_auto_2"
-                                text.contains("WBV Auto попытка") -> "captcha_auto_3"
+                                text.contains("WBV Auto") && text.contains("одна попытка") -> "captcha_auto_3"
                                 text.contains("финальная") -> "captcha_auto_4"
                                 text.contains("ручной WebView") -> "captcha_auto_5"
                                 text.contains("решил") || text.contains("решила") -> "captcha_auto_done"
@@ -597,8 +597,8 @@ object TunnelManager {
                             
                             val isErr = text.contains("Ошибка")
                             val stableKey = when {
-                                text.contains("Запрос") -> "captcha_wv_step_2"
-                                text.contains("Токен") -> "captcha_wv_step_5"
+                                text.contains("Запрос") -> "captcha_wv_step_2_request"
+                                text.contains("Токен") -> "captcha_wv_step_5_token"
                                 isErr -> "captcha_wv_err"
                                 else -> "captcha_wv_go_other"
                             }
@@ -874,7 +874,7 @@ object TunnelManager {
                     }
                 }
             }
-            updateLog("captcha_wv_step_4", "[КАПЧА WBV] Капча решена ✓", 5, false)
+            updateLog("captcha_wv_step_6_done", "[КАПЧА WBV] Капча решена ✓", 5, false)
             writeCaptchaResult(token)
         } catch (e: IllegalStateException) {
             val errorMsg = e.message ?: "WV state error"
@@ -894,16 +894,16 @@ object TunnelManager {
             writeCaptchaResult("error:$errorMsg")
         }
 
-        updateLog("captcha_wv_step_6", "[КАПЧА WBV] WebView уничтожен", 5, false)
+        updateLog("captcha_wv_step_7_destroyed", "[КАПЧА WBV] WebView уничтожен", 5, false)
     }
 
     private suspend fun solveSingleAutoWebViewCaptcha(
         redirectUri: String,
         sessionToken: String
     ): String {
-        updateLog("captcha_wv_step_1", "[КАПЧА WBV] Авто WebView попытка 10с...", 5, false)
+        updateLog("captcha_wv_step_1", "[КАПЧА WBV] Авто WebView, ожидание до 20с...", 5, false)
         return CaptchaWebViewManager.solveCaptchaAsync(redirectUri, sessionToken) { step ->
-            updateLog("captcha_wv_auto_step", "[КАПЧА WBV] $step", 5, false)
+            updateLog(step.stableKey, "[КАПЧА WBV] ${step.message}", 5, step.isError)
         }
     }
 
@@ -912,27 +912,22 @@ object TunnelManager {
         redirectUri: String,
         sessionToken: String
     ): String {
-        for (attempt in 1..2) {
-            updateLog("captcha_wv_step_1", "[КАПЧА WBV] Авто WebView попытка $attempt/2...", 5, false)
-            try {
-                return CaptchaWebViewManager.solveCaptchaAsync(redirectUri, sessionToken) { step ->
-                    updateLog("captcha_wv_auto_step", "[КАПЧА WBV] $step", 5, false)
-                }
-            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-                updateLog("captcha_wv_timeout_$attempt", "[КАПЧА WBV] Авто таймаут 10с ($attempt/2)", 5, attempt == 2)
-                if (attempt == 2) {
-                    updateLog("captcha_wv_fallback", "[КАПЧА WBV] 2 таймаута авто, открыт ручной WebView", 5, false)
-                    return ManlCaptchaWebViewManager.solveCaptchaAsync(ctx, redirectUri, sessionToken)
-                }
-            } catch (e: IllegalStateException) {
-                if (e.message == CaptchaWebViewManager.ERROR_SLIDER_DETECTED) {
-                    updateLog("captcha_wv_fallback", "[КАПЧА WBV] Обнаружен слайдер, открыт ручной WebView", 5, false)
-                    return ManlCaptchaWebViewManager.solveCaptchaAsync(ctx, redirectUri, sessionToken)
-                }
-                throw e
+        updateLog("captcha_wv_step_1", "[КАПЧА WBV] Авто WebView, ожидание до 20с...", 5, false)
+        try {
+            return CaptchaWebViewManager.solveCaptchaAsync(redirectUri, sessionToken) { step ->
+                updateLog(step.stableKey, "[КАПЧА WBV] ${step.message}", 5, step.isError)
             }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            updateLog("captcha_wv_timeout", "[КАПЧА WBV] Авто таймаут 20с", 5, true)
+            updateLog("captcha_wv_fallback", "[КАПЧА WBV] Авто не решило капчу, открыт ручной WebView", 5, false)
+            return ManlCaptchaWebViewManager.solveCaptchaAsync(ctx, redirectUri, sessionToken)
+        } catch (e: IllegalStateException) {
+            if (e.message == CaptchaWebViewManager.ERROR_SLIDER_DETECTED) {
+                updateLog("captcha_wv_fallback", "[КАПЧА WBV] Обнаружен слайдер, открыт ручной WebView", 5, false)
+                return ManlCaptchaWebViewManager.solveCaptchaAsync(ctx, redirectUri, sessionToken)
+            }
+            throw e
         }
-        return ManlCaptchaWebViewManager.solveCaptchaAsync(ctx, redirectUri, sessionToken)
     }
 
     private fun writeCaptchaResult(result: String) {

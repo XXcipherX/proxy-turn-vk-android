@@ -280,7 +280,7 @@ func main() {
 		wrapStatus = "ON (password HKDF + RTP AEAD)"
 	}
 
-	captchaStatus := "AUTO: Go v2 x2 -> WBV Auto x2 -> Go v2 x1 -> Manual WBV"
+	captchaStatus := "AUTO: Go v2 x2 -> WBV Auto x1 -> Go v2 x1 -> Manual WBV"
 	switch activeCaptchaMode {
 	case "wv":
 		captchaStatus = "WBV selected in Android"

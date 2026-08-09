@@ -1,6 +1,5 @@
 package com.wdtt.client
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
@@ -22,6 +21,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
@@ -29,19 +29,17 @@ import kotlin.random.Random
 object CaptchaWebViewManager {
 
     private const val TAG = "CaptchaWV"
-    private const val CAPTCHA_TIMEOUT_MS = 10_000L
+    private const val CAPTCHA_TIMEOUT_MS = 20_000L
     private const val WV_CREATE_TIMEOUT_MS = 3000L
     const val ERROR_SLIDER_DETECTED = "slider_detected"
 
-    
-    private val VIEWPORT_WIDTHS = intArrayOf(356, 358, 360, 362, 364, 366, 368)
-    private val VIEWPORT_HEIGHTS = intArrayOf(376, 378, 380, 382, 384, 386, 388)
-
-    
-    private val CHROME_BUILDS = arrayOf(
-        "146.0.0.0", "145.0.6422.60", "145.0.6422.53",
-        "144.0.6367.78", "144.0.6367.61", "143.0.6312.99"
-    )
+    enum class Step(val stableKey: String, val message: String, val isError: Boolean = false) {
+        PAGE_LOADED("captcha_wv_step_2_page", "Страница загружена"),
+        CHECKBOX_FOUND("captcha_wv_step_3_checkbox", "Checkbox найден"),
+        CHECKBOX_CLICKED("captcha_wv_step_4_click", "Клик выполнен"),
+        API_RESPONSE("captcha_wv_step_5_response", "Ответ API получен"),
+        SLIDER_DETECTED("captcha_wv_step_5_slider", "Обнаружен слайдер", true)
+    }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val captchaMutex = Mutex()
@@ -54,6 +52,7 @@ object CaptchaWebViewManager {
 
     private val pendingResult = AtomicReference<CompletableDeferred<Result<String>>?>(null)
     private val postClickSliderWatcher = AtomicReference<Runnable?>(null)
+    private val checkboxSearchStarted = AtomicBoolean(false)
 
     @Volatile
     private var currentWebView: WebView? = null
@@ -73,6 +72,7 @@ object CaptchaWebViewManager {
                     const clone = response.clone();
                     try {
                         const data = await clone.json();
+                        window.WdttCaptcha.onApiResponse();
                         if (data.response && data.response.success_token) {
                             window.WdttCaptcha.onSuccess(data.response.success_token);
                         } else if (
@@ -101,6 +101,7 @@ object CaptchaWebViewManager {
                     xhr.addEventListener('load', function() {
                         try {
                             const data = JSON.parse(xhr.responseText);
+                            window.WdttCaptcha.onApiResponse();
                             if (data.response && data.response.success_token) {
                                 window.WdttCaptcha.onSuccess(data.response.success_token);
                             } else if (
@@ -141,7 +142,7 @@ object CaptchaWebViewManager {
     
     
 
-    suspend fun solveCaptchaAsync(redirectUri: String, sessionToken: String, onStep: (String) -> Unit = {}): String {
+    suspend fun solveCaptchaAsync(redirectUri: String, sessionToken: String, onStep: (Step) -> Unit = {}): String {
         if (!isTunnelActive) throw IllegalStateException("WV не готов — туннель не активен")
         val ctx = appContext ?: throw IllegalStateException("WV не готов — контекст null")
 
@@ -163,7 +164,7 @@ object CaptchaWebViewManager {
     
     
 
-    private suspend fun doSolveCaptcha(context: Context, redirectUri: String, onStep: (String) -> Unit): String {
+    private suspend fun doSolveCaptcha(context: Context, redirectUri: String, onStep: (Step) -> Unit): String {
         val deferred = CompletableDeferred<Result<String>>()
         pendingResult.set(deferred)
 
@@ -196,15 +197,10 @@ object CaptchaWebViewManager {
     
     
 
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun createWebViewSync(context: Context, onStep: (String) -> Unit): WebView? {
-        
-        val vw = VIEWPORT_WIDTHS[Random.Default.nextInt(VIEWPORT_WIDTHS.size)]
-        val vh = VIEWPORT_HEIGHTS[Random.Default.nextInt(VIEWPORT_HEIGHTS.size)]
-        val chromeBuild = CHROME_BUILDS[Random.Default.nextInt(CHROME_BUILDS.size)]
-        val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeBuild Safari/537.36"
-
-        Log.d(TAG, "Fingerprint: ${vw}x${vh}, Chrome/$chromeBuild")
+    private fun createWebViewSync(context: Context, onStep: (Step) -> Unit): WebView? {
+        val displayMetrics = context.resources.displayMetrics
+        val vw = displayMetrics.widthPixels.coerceAtLeast(1)
+        val vh = displayMetrics.heightPixels.coerceAtLeast(1)
 
         val latch = CountDownLatch(1)
         var webView: WebView? = null
@@ -213,18 +209,10 @@ object CaptchaWebViewManager {
             try {
                 val wv = WebView(context.applicationContext)
                 wv.apply {
-                    settings.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        mediaPlaybackRequiresUserGesture = false
-                        loadWithOverviewMode = true
-                        useWideViewPort = true
-                        blockNetworkLoads = false
-                        cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
-                        userAgentString = ua
-                    }
+                    val userAgent = configureCaptchaWebView()
+                    Log.d(TAG, "System WebView: ${vw}x${vh}, UA: $userAgent")
 
-                    addJavascriptInterface(CaptchaJSBridge(), "WdttCaptcha")
+                    addJavascriptInterface(CaptchaJSBridge(onStep), "WdttCaptcha")
 
                     webViewClient = object : WebViewClient() {
                         override fun onPageStarted(
@@ -244,15 +232,18 @@ object CaptchaWebViewManager {
                             } ?: false
 
                             if (isCaptchaPage) {
-                                Log.d(TAG, "Страница капчи загружена")
                                 view.evaluateJavascript(interceptorJSCode, null)
 
-                                if (currentWebView === view && isTunnelActive) {
+                                if (currentWebView === view && isTunnelActive &&
+                                    checkboxSearchStarted.compareAndSet(false, true)
+                                ) {
+                                    Log.d(TAG, "Страница капчи загружена")
+                                    reportStep(onStep, Step.PAGE_LOADED)
                                     
                                     val pageLoadDelay = 650L + Random.Default.nextLong(0, 550)
                                     mainHandler.postDelayed({
                                         if (currentWebView === view && isTunnelActive) {
-                                            solveCaptchaAutomatedSync(view)
+                                            solveCaptchaAutomatedSync(view, onStep)
                                         }
                                     }, pageLoadDelay)
                                 }
@@ -317,6 +308,7 @@ object CaptchaWebViewManager {
     private fun destroyCurrentWebView() {
         val wv = currentWebView ?: return
         currentWebView = null
+        checkboxSearchStarted.set(false)
         postClickSliderWatcher.getAndSet(null)?.let { mainHandler.removeCallbacks(it) }
 
         val destroyAction = Runnable {
@@ -359,7 +351,7 @@ object CaptchaWebViewManager {
     
     
 
-    private fun solveCaptchaAutomatedSync(webView: WebView) {
+    private fun solveCaptchaAutomatedSync(webView: WebView, onStep: (Step) -> Unit) {
         if (currentWebView !== webView || !isTunnelActive) return
 
         
@@ -400,12 +392,12 @@ object CaptchaWebViewManager {
 
             if (result == ERROR_SLIDER_DETECTED) {
                 Log.i(TAG, "Обнаружен слайдер — fallback на ручной WebView")
+                reportStep(onStep, Step.SLIDER_DETECTED)
                 notifyResult(Result.failure(IllegalStateException(ERROR_SLIDER_DETECTED)))
                 return@evaluateJavascript
             }
 
             if (result == "not_found" || result.split(",").size < 4) {
-                
                 Log.w(TAG, "Label не найден — JS-клик (fallback)")
                 val jsClick = """
                     (function() {
@@ -417,17 +409,28 @@ object CaptchaWebViewManager {
                 """.trimIndent()
                 webView.evaluateJavascript(jsClick) { clickResult ->
                     if ((clickResult ?: "").replace("\"", "") == "clicked") {
-                        startPostClickSliderWatcher(webView)
+                        reportStep(onStep, Step.CHECKBOX_FOUND)
+                        reportStep(onStep, Step.CHECKBOX_CLICKED)
+                        startPostClickSliderWatcher(webView, onStep)
+                    } else {
+                        Log.d(TAG, "Checkbox пока не найден, повторный поиск")
+                        scheduleCheckboxSearch(webView, onStep)
                     }
                 }
                 return@evaluateJavascript
             }
 
             val parts = result.split(",")
-            val left = parts[0].toFloatOrNull() ?: return@evaluateJavascript
-            val top = parts[1].toFloatOrNull() ?: return@evaluateJavascript
-            val width = parts[2].toFloatOrNull() ?: return@evaluateJavascript
-            val height = parts[3].toFloatOrNull() ?: return@evaluateJavascript
+            val left = parts[0].toFloatOrNull()
+            val top = parts[1].toFloatOrNull()
+            val width = parts[2].toFloatOrNull()
+            val height = parts[3].toFloatOrNull()
+            if (left == null || top == null || width == null || height == null) {
+                Log.d(TAG, "Координаты checkbox ещё не готовы, повторный поиск")
+                scheduleCheckboxSearch(webView, onStep)
+                return@evaluateJavascript
+            }
+            reportStep(onStep, Step.CHECKBOX_FOUND)
 
             
             
@@ -441,13 +444,22 @@ object CaptchaWebViewManager {
             mainHandler.postDelayed({
                 if (currentWebView === webView && isTunnelActive) {
                     simulateHumanTouch(webView, randX, randY)
-                    startPostClickSliderWatcher(webView)
+                    reportStep(onStep, Step.CHECKBOX_CLICKED)
+                    startPostClickSliderWatcher(webView, onStep)
                 }
             }, thinkDelay)
         }
     }
 
-    private fun startPostClickSliderWatcher(webView: WebView) {
+    private fun scheduleCheckboxSearch(webView: WebView, onStep: (Step) -> Unit) {
+        mainHandler.postDelayed({
+            if (currentWebView === webView && isTunnelActive) {
+                solveCaptchaAutomatedSync(webView, onStep)
+            }
+        }, 500L)
+    }
+
+    private fun startPostClickSliderWatcher(webView: WebView, onStep: (Step) -> Unit) {
         postClickSliderWatcher.getAndSet(null)?.let { mainHandler.removeCallbacks(it) }
 
         var attemptsLeft = 14
@@ -481,6 +493,7 @@ object CaptchaWebViewManager {
                     when (result) {
                         "slider" -> {
                             Log.i(TAG, "После checkbox появился слайдер — fallback на ручной WebView")
+                            reportStep(onStep, Step.SLIDER_DETECTED)
                             notifyResult(Result.failure(IllegalStateException(ERROR_SLIDER_DETECTED)))
                         }
                         "success_ui" -> {
@@ -547,7 +560,13 @@ object CaptchaWebViewManager {
     
     
 
-    private class CaptchaJSBridge {
+    private class CaptchaJSBridge(private val onStep: (Step) -> Unit) {
+        @JavascriptInterface
+        fun onApiResponse() {
+            Log.d(TAG, "JS: ответ captchaNotRobot.check получен")
+            reportStep(onStep, Step.API_RESPONSE)
+        }
+
         @JavascriptInterface
         fun onSuccess(token: String) {
             Log.d(TAG, "JS: success_token получен (${token.length} символов)")
@@ -557,6 +576,7 @@ object CaptchaWebViewManager {
         @JavascriptInterface
         fun onSliderDetected(source: String) {
             Log.i(TAG, "JS: обнаружен slider после auto-step ($source)")
+            reportStep(onStep, Step.SLIDER_DETECTED)
             notifyResult(Result.failure(IllegalStateException(ERROR_SLIDER_DETECTED)))
         }
 
@@ -564,6 +584,14 @@ object CaptchaWebViewManager {
         fun onError(error: String) {
             Log.e(TAG, "JS: ошибка — $error")
             notifyResult(Result.failure(Exception("VK: $error")))
+        }
+    }
+
+    private fun reportStep(onStep: (Step) -> Unit, step: Step) {
+        try {
+            onStep(step)
+        } catch (e: Exception) {
+            Log.w(TAG, "Не удалось записать этап ${step.name}: ${e.message}")
         }
     }
 
