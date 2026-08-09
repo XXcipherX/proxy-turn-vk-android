@@ -67,9 +67,24 @@ func TestParseGetConfRequest(t *testing.T) {
 				Password:   "Strong-Test_7kM9xQ2",
 			},
 		},
+		{
+			name:       "valid lifecycle v2 shape",
+			packet:     "GETCONF:9000|android-device|Strong-Test_7kM9xQ2|550e8400-e29b-41d4-a716-446655440000|27",
+			recognized: true,
+			want: getConfRequest{
+				ClientPort:   "9000",
+				DeviceID:     "android-device",
+				Password:     "Strong-Test_7kM9xQ2",
+				GenerationID: "550e8400-e29b-41d4-a716-446655440000",
+				WorkerID:     "27",
+			},
+		},
 		{name: "not GETCONF", packet: "READY"},
 		{name: "missing password", packet: "GETCONF:9000|device", recognized: true, wantErr: true},
 		{name: "extra field", packet: "GETCONF:9000|device|secret|extra", recognized: true, wantErr: true},
+		{name: "missing worker ID", packet: "GETCONF:9000|device|secret|generation|", recognized: true, wantErr: true},
+		{name: "invalid generation ID", packet: "GETCONF:9000|device|secret|generation/unsafe|worker", recognized: true, wantErr: true},
+		{name: "invalid worker ID", packet: "GETCONF:9000|device|secret|generation|worker/unsafe", recognized: true, wantErr: true},
 		{name: "zero port", packet: "GETCONF:0|device|secret", recognized: true, wantErr: true},
 		{name: "large port", packet: "GETCONF:65536|device|secret", recognized: true, wantErr: true},
 		{name: "empty device", packet: "GETCONF:9000||secret", recognized: true, wantErr: true},
@@ -89,6 +104,27 @@ func TestParseGetConfRequest(t *testing.T) {
 			}
 			if err == nil && got != tc.want {
 				t.Fatalf("request = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRelayKeepaliveRecognition(t *testing.T) {
+	tests := []struct {
+		name   string
+		packet []byte
+		want   bool
+	}{
+		{name: "iOS zero byte", packet: []byte{0x00}, want: true},
+		{name: "Android ff byte", packet: []byte{0xFF}, want: true},
+		{name: "other single byte", packet: []byte{0x01}},
+		{name: "WireGuard payload", packet: []byte{0x00, 0x01}},
+		{name: "empty", packet: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRelayKeepalive(tc.packet); got != tc.want {
+				t.Fatalf("isRelayKeepalive(%x) = %v, want %v", tc.packet, got, tc.want)
 			}
 		})
 	}
@@ -138,6 +174,9 @@ func FuzzGetConfRequest(f *testing.F) {
 		}
 		if req.DeviceID == "" || req.Password == "" {
 			t.Fatal("parser returned an empty required field")
+		}
+		if (req.GenerationID == "") != (req.WorkerID == "") {
+			t.Fatal("parser returned a partial lifecycle identity")
 		}
 	})
 }

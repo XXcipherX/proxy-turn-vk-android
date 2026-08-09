@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
@@ -101,6 +102,8 @@ func main() {
 	publicHost := flag.String("public-host", os.Getenv("WDTT_PUBLIC_HOST"), "публичный IPv4 или DNS-имя для wdtt:// ссылок")
 	maxConnections := flag.Int("max-connections", 512, "максимум одновременных DTLS-соединений")
 	handshakeRate := flag.Int("handshake-rate", 64, "максимум новых DTLS handshakes в секунду")
+	legacyConnections := flag.Int("legacy-connections-per-device", defaultLegacyConnCap, "максимум legacy WRAP-A соединений на устройство")
+	relayIdleTimeout := flag.Duration("relay-idle-timeout", defaultRelayIdleTime, "таймаут relay без пакетов или keepalive")
 	flag.Parse()
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	if flag.NArg() != 0 {
@@ -111,6 +114,12 @@ func main() {
 	}
 	if *handshakeRate < 1 || *handshakeRate > 10000 {
 		log.Fatalf("[CONFIG] handshake-rate должен быть от 1 до 10000")
+	}
+	if *legacyConnections < 1 || *legacyConnections > 10000 {
+		log.Fatalf("[CONFIG] legacy-connections-per-device должен быть от 1 до 10000")
+	}
+	if *relayIdleTimeout < 30*time.Second || *relayIdleTimeout > 24*time.Hour {
+		log.Fatalf("[CONFIG] relay-idle-timeout должен быть от 30s до 24h")
 	}
 	if *wgPort < 1 || *wgPort > 65535 {
 		log.Fatalf("[CONFIG] wg-port должен быть от 1 до 65535")
@@ -142,6 +151,7 @@ func main() {
 	}
 	connectionLimit := newConnectionLimiter(*maxConnections, *handshakeRate)
 	identityLimit := newIdentityConnectionLimiter(*maxConnections, *handshakeRate)
+	lifecycleRegistry := newRelayLifecycleRegistry(*legacyConnections)
 
 	if v := strings.TrimSpace(*dnsFlag); v != "" {
 		dns = v
@@ -223,6 +233,7 @@ func main() {
 	log.Printf("   DTLS: %s | WG: %s | NAT: %s", *listen, wgEndpoint, natType)
 	log.Printf("   WRAP: password HKDF + RTP AEAD | keys: %d", serverWrapKeys.Count())
 	log.Printf("   LIMITS: connections=%d | handshakes=%d/s", *maxConnections, *handshakeRate)
+	log.Printf("   LIFECYCLE: legacy/device=%d | relay idle=%s", *legacyConnections, relayIdleTimeout.String())
 	log.Printf("   TEMP LIMITS: total=%d | per-password=%d | per-IP=%d | handshakes=%.1f/s | per-password=%.1f/s",
 		identityLimit.maxGeneratedTotal, identityLimit.maxPerPassword, identityLimit.maxPerSourceIP,
 		identityLimit.generatedRate, identityLimit.perPasswordRate)
@@ -271,7 +282,7 @@ func main() {
 			defer connectionLimit.Release()
 			defer identityLimit.Release(admittedIdentity, admittedAddr)
 			defer c.Close()
-			handleConn(ctx, c, admittedIdentity, wgEndpoint, wgDev, keys)
+			handleConn(ctx, c, admittedIdentity, wgEndpoint, wgDev, keys, lifecycleRegistry, *relayIdleTimeout)
 		}(dtlsConn, identity, remoteAddr)
 	}
 }

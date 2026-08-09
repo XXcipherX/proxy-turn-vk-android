@@ -593,9 +593,30 @@ PersistentKeepalive = %d`,
 }
 
 type getConfRequest struct {
-	ClientPort string
-	DeviceID   string
-	Password   string
+	ClientPort   string
+	DeviceID     string
+	Password     string
+	GenerationID string
+	WorkerID     string
+}
+
+func (r getConfRequest) IsLifecycleV2() bool {
+	return r.GenerationID != ""
+}
+
+func validateLifecycleID(name, value string) error {
+	if len(value) == 0 || len(value) > 64 {
+		return fmt.Errorf("%s must contain 1 to 64 characters", name)
+	}
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == ':' || ch == '-' {
+			continue
+		}
+		return fmt.Errorf("%s contains unsupported byte 0x%02x", name, ch)
+	}
+	return nil
 }
 
 func parseGetConfRequest(packet []byte) (getConfRequest, bool, error) {
@@ -606,8 +627,8 @@ func parseGetConfRequest(packet []byte) (getConfRequest, bool, error) {
 	}
 
 	parts := strings.Split(strings.TrimSpace(strings.TrimPrefix(raw, prefix)), "|")
-	if len(parts) != 3 {
-		return getConfRequest{}, true, errors.New("GETCONF must contain port, device ID and password")
+	if len(parts) != 3 && len(parts) != 5 {
+		return getConfRequest{}, true, errors.New("GETCONF must contain either 3 legacy fields or 5 lifecycle fields")
 	}
 	port, err := strconv.Atoi(parts[0])
 	if err != nil || port < 1 || port > 65535 {
@@ -619,11 +640,22 @@ func parseGetConfRequest(packet []byte) (getConfRequest, bool, error) {
 	if len(parts[2]) == 0 || len(parts[2]) > 128 {
 		return getConfRequest{}, true, errors.New("GETCONF contains an invalid password")
 	}
-	return getConfRequest{
+	request := getConfRequest{
 		ClientPort: parts[0],
 		DeviceID:   parts[1],
 		Password:   parts[2],
-	}, true, nil
+	}
+	if len(parts) == 5 {
+		if err := validateLifecycleID("generation ID", parts[3]); err != nil {
+			return getConfRequest{}, true, fmt.Errorf("GETCONF contains an invalid generation ID: %w", err)
+		}
+		if err := validateLifecycleID("worker ID", parts[4]); err != nil {
+			return getConfRequest{}, true, fmt.Errorf("GETCONF contains an invalid worker ID: %w", err)
+		}
+		request.GenerationID = parts[3]
+		request.WorkerID = parts[4]
+	}
+	return request, true, nil
 }
 
 func provisionClientConfig(wgDev *device.Device, keys *wgKeys, request getConfRequest, connPassword string, connIsMainPass bool) (string, string, error) {
@@ -713,11 +745,14 @@ func provisionClientConfig(wgDev *device.Device, keys *wgKeys, request getConfRe
 		dbMutex.Unlock()
 		return "", "NOCONF", err
 	}
-	// GETCONF is successful only after the current device/binding state is
-	// durable. Saving even an apparently existing device also repairs a retry
-	// after an earlier synchronous persistence failure.
-	if err := saveDBCritical(); err != nil {
-		return "", "NOCONF", err
+	// A new device or password binding must be durable before GETCONF succeeds.
+	// A dirty revision also covers a retry after an earlier synchronous save
+	// failure. Established clients therefore do not rewrite the database once
+	// per relay worker.
+	if createdDevice || boundPassword || dbRevision.Load() > dbSavedRevision.Load() {
+		if err := saveDBCritical(); err != nil {
+			return "", "NOCONF", err
+		}
 	}
 
 	return buildClientConfig(keys.serverPublic, deviceSnapshot.PrivKey, deviceSnapshot.IP, request.ClientPort), "", nil
@@ -733,13 +768,44 @@ func addTraffic(total, passwordTotal *int64, bytes int, trackPassword bool) {
 	}
 }
 
-func handleConn(ctx context.Context, clientConn net.Conn, identity wrapIdentity, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
-	// Добавлен defer для предотвращения утечки сокетов при ошибках на любом этапе функции
+func isRelayKeepalive(packet []byte) bool {
+	return len(packet) == 1 && (packet[0] == 0x00 || packet[0] == 0xFF)
+}
+
+func readRelayPacket(clientConn net.Conn, buf []byte, idleTimeout time.Duration) ([]byte, error) {
+	for {
+		if err := clientConn.SetReadDeadline(time.Now().Add(idleTimeout)); err != nil {
+			return nil, err
+		}
+		n, err := clientConn.Read(buf)
+		if err != nil {
+			return nil, err
+		}
+		packet := buf[:n]
+		if len(packet) == 0 || isRelayKeepalive(packet) {
+			continue
+		}
+		return packet, nil
+	}
+}
+
+func handleConn(
+	ctx context.Context,
+	clientConn net.Conn,
+	identity wrapIdentity,
+	wgEndpoint string,
+	wgDev *device.Device,
+	keys *wgKeys,
+	lifecycleRegistry *relayLifecycleRegistry,
+	relayIdleTimeout time.Duration,
+) {
 	defer clientConn.Close()
-	stopShutdownDeadline := context.AfterFunc(ctx, func() {
+	connCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel()
+	stopConnectionDeadline := context.AfterFunc(connCtx, func() {
 		_ = clientConn.SetDeadline(time.Now())
 	})
-	defer stopShutdownDeadline()
+	defer stopConnectionDeadline()
 
 	atomic.AddInt64(&totalConns, 1)
 
@@ -748,7 +814,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, identity wrapIdentity,
 		return
 	}
 
-	hctx, hcancel := context.WithTimeout(ctx, dtlsHandshakeTimeout)
+	hctx, hcancel := context.WithTimeout(connCtx, dtlsHandshakeTimeout)
 	if err := dtlsConn.HandshakeContext(hctx); err != nil {
 		hcancel()
 		return
@@ -768,15 +834,12 @@ func handleConn(ctx context.Context, clientConn net.Conn, identity wrapIdentity,
 	defer atomic.AddInt32(&activeConns, -1)
 
 	buf := make([]byte, 1600)
-	clientConn.SetReadDeadline(time.Now().Add(30 * time.Second))
-	n, err := clientConn.Read(buf)
+	firstPacket, err := readRelayPacket(clientConn, buf, 30*time.Second)
 	if err != nil {
 		return
 	}
-	clientConn.SetReadDeadline(time.Time{})
-
-	firstPacket := buf[:n]
 	firstStr := string(firstPacket)
+	var lifecycleRegistration *relayLifecycleRegistration
 
 	getConf, isGetConf, getConfErr := parseGetConfRequest(firstPacket)
 	if isGetConf {
@@ -805,29 +868,42 @@ func handleConn(ctx context.Context, clientConn net.Conn, identity wrapIdentity,
 			}
 			return
 		}
+		if getConf.IsLifecycleV2() {
+			var accepted bool
+			lifecycleRegistration, accepted = lifecycleRegistry.RegisterV2(
+				deviceID, getConf.GenerationID, getConf.WorkerID, connCancel,
+			)
+			if !accepted {
+				_, _ = clientConn.Write([]byte("DENIED:stale_generation"))
+				log.Printf("[LIFECYCLE] Отклонён поздний воркер %s/%s устройства %s", getConf.GenerationID, getConf.WorkerID, deviceID)
+				return
+			}
+		} else {
+			lifecycleRegistration = lifecycleRegistry.RegisterLegacy(deviceID, connCancel)
+		}
+		if lifecycleRegistration != nil {
+			defer lifecycleRegistration.Release()
+		}
 		if _, err := clientConn.Write([]byte(config)); err != nil {
 			return
 		}
 
-		clientConn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		n, err = clientConn.Read(buf)
+		firstPacket, err = readRelayPacket(clientConn, buf, relayIdleTimeout)
 		if err != nil {
 			return
 		}
-		clientConn.SetReadDeadline(time.Time{})
-		firstPacket = buf[:n]
 		firstStr = string(firstPacket)
 	}
 
-	if firstStr == "READY" {
-		clientConn.Write([]byte("READY_OK"))
-		clientConn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		n, err = clientConn.Read(buf)
+	for firstStr == "READY" {
+		if _, err := clientConn.Write([]byte("READY_OK")); err != nil {
+			return
+		}
+		firstPacket, err = readRelayPacket(clientConn, buf, relayIdleTimeout)
 		if err != nil {
 			return
 		}
-		clientConn.SetReadDeadline(time.Time{})
-		firstPacket = buf[:n]
+		firstStr = string(firstPacket)
 	}
 
 	if !passwordActive() {
@@ -853,7 +929,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, identity wrapIdentity,
 	}
 	addTraffic(&totalBytesFromClient, &localUpBytes, len(firstPacket), !connIsMainPass)
 
-	pctx, pcancel := context.WithCancel(ctx)
+	pctx, pcancel := context.WithCancel(connCtx)
 	defer pcancel()
 
 	stopProxyDeadline := context.AfterFunc(pctx, func() {
@@ -914,24 +990,18 @@ func handleConn(ctx context.Context, clientConn net.Conn, identity wrapIdentity,
 		b := getBuf()
 		defer putBuf(b)
 
-		var lastDeadlineUpdate time.Time
 		for {
 			if pctx.Err() != nil {
 				return
 			}
-			// Вызываем дедлайн только раз в 15 секунд, а не на каждый пакет
-			now := time.Now()
-			if now.Sub(lastDeadlineUpdate) > 15*time.Second {
-				clientConn.SetReadDeadline(now.Add(30 * time.Minute))
-				lastDeadlineUpdate = now
-			}
+			clientConn.SetReadDeadline(time.Now().Add(relayIdleTimeout))
 
 			nn, err := clientConn.Read(*b)
 			if err != nil {
 				return
 			}
 
-			if nn == 1 && (*b)[0] == 0xFF {
+			if isRelayKeepalive((*b)[:nn]) {
 				continue
 			}
 			if !passwordActive() {
