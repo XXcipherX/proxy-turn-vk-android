@@ -202,7 +202,7 @@ func main() {
 	workers.Add(3)
 	go func() {
 		defer workers.Done()
-		statsLoop(ctx, *configDir)
+		statsLoop(ctx, *configDir, lifecycleRegistry)
 	}()
 	go func() {
 		defer workers.Done()

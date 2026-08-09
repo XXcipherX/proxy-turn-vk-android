@@ -42,13 +42,15 @@ var (
 	totalBytesFromClient int64
 	totalBytesToClient   int64
 	activeConns          int32
+	activeV2Conns        int32
+	activeLegacyConns    int32
 	totalConns           int64
 	rejectedConns        int64
 	natType              string = "Инициализация..."
 	serverStartTime      time.Time
 )
 
-func statsLoop(ctx context.Context, configDir string) {
+func statsLoop(ctx context.Context, configDir string, lifecycleRegistry *relayLifecycleRegistry) {
 	serverStartTime = time.Now()
 	statsFile := filepath.Join(configDir, "server.log")
 
@@ -64,8 +66,11 @@ func statsLoop(ctx context.Context, configDir string) {
 			fromC := atomic.LoadInt64(&totalBytesFromClient)
 			toC := atomic.LoadInt64(&totalBytesToClient)
 			active := atomic.LoadInt32(&activeConns)
+			activeV2 := atomic.LoadInt32(&activeV2Conns)
+			activeLegacy := atomic.LoadInt32(&activeLegacyConns)
 			total := atomic.LoadInt64(&totalConns)
 			rejected := atomic.LoadInt64(&rejectedConns)
+			lifecycle := lifecycleRegistry.Stats()
 			uptime := time.Since(serverStartTime)
 
 			dbMutex.Lock()
@@ -77,20 +82,27 @@ func statsLoop(ctx context.Context, configDir string) {
 			downGB := float64(toC) / (1024 * 1024 * 1024)
 			upGB := float64(fromC) / (1024 * 1024 * 1024)
 
-			log.Printf("[СТАТ] Активных: %d | Всего соединений: %d | Отклонено лимитом: %d | Uptime: %s | Получено: %.2f GB | Отправлено: %.2f GB | Паролей: %d | Устройств: %d",
-				active, total, rejected, uptimeStr, downGB, upGB, numPasswords, numDevices)
+			log.Printf("[СТАТ] Активных: %d (v2: %d, legacy: %d) | Принято за uptime: %d | Отклонено лимитом: %d | Заменено v2: %d | Отклонено stale v2: %d | Вытеснено legacy: %d | Uptime: %s | Получено: %.2f GB | Отправлено: %.2f GB | Паролей: %d | Устройств: %d",
+				active, activeV2, activeLegacy, total, rejected, lifecycle.V2Replaced, lifecycle.V2StaleDenied,
+				lifecycle.LegacyEvicted, uptimeStr, downGB, upGB, numPasswords, numDevices)
 
 			statsJSON, _ := json.Marshal(map[string]interface{}{
-				"active":    active,
-				"total":     total,
-				"rejected":  rejected,
-				"nat":       natType,
-				"uptime":    uptimeStr,
-				"down_gb":   fmt.Sprintf("%.2f", downGB),
-				"up_gb":     fmt.Sprintf("%.2f", upGB),
-				"passwords": numPasswords,
-				"devices":   numDevices,
-				"timestamp": time.Now().Unix(),
+				"active":               active,
+				"active_v2":            activeV2,
+				"active_legacy":        activeLegacy,
+				"total":                total,
+				"accepted_since_start": total,
+				"rejected":             rejected,
+				"v2_replaced":          lifecycle.V2Replaced,
+				"v2_stale_denied":      lifecycle.V2StaleDenied,
+				"legacy_evicted":       lifecycle.LegacyEvicted,
+				"nat":                  natType,
+				"uptime":               uptimeStr,
+				"down_gb":              fmt.Sprintf("%.2f", downGB),
+				"up_gb":                fmt.Sprintf("%.2f", upGB),
+				"passwords":            numPasswords,
+				"devices":              numDevices,
+				"timestamp":            time.Now().Unix(),
 			})
 			os.WriteFile(statsFile, statsJSON, 0644)
 		}
@@ -832,6 +844,30 @@ func handleConn(
 	}
 	atomic.AddInt32(&activeConns, 1)
 	defer atomic.AddInt32(&activeConns, -1)
+	var relayModeTracked bool
+	var relayModeV2 bool
+	trackRelayMode := func(v2 bool) {
+		if relayModeTracked {
+			return
+		}
+		relayModeTracked = true
+		relayModeV2 = v2
+		if v2 {
+			atomic.AddInt32(&activeV2Conns, 1)
+		} else {
+			atomic.AddInt32(&activeLegacyConns, 1)
+		}
+	}
+	defer func() {
+		if !relayModeTracked {
+			return
+		}
+		if relayModeV2 {
+			atomic.AddInt32(&activeV2Conns, -1)
+		} else {
+			atomic.AddInt32(&activeLegacyConns, -1)
+		}
+	}()
 
 	buf := make([]byte, 1600)
 	firstPacket, err := readRelayPacket(clientConn, buf, 30*time.Second)
@@ -884,6 +920,7 @@ func handleConn(
 		if lifecycleRegistration != nil {
 			defer lifecycleRegistration.Release()
 		}
+		trackRelayMode(getConf.IsLifecycleV2())
 		if _, err := clientConn.Write([]byte(config)); err != nil {
 			return
 		}
@@ -893,6 +930,9 @@ func handleConn(
 			return
 		}
 		firstStr = string(firstPacket)
+	}
+	if !isGetConf {
+		trackRelayMode(false)
 	}
 
 	for firstStr == "READY" {
