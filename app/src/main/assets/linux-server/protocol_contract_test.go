@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/hex"
+	"io"
+	"net"
 	"strconv"
 	"strings"
 	"testing"
@@ -130,6 +132,55 @@ func TestRelayKeepaliveRecognition(t *testing.T) {
 		})
 	}
 }
+
+func TestInitialRelayPacketDeadlineIsAbsolute(t *testing.T) {
+	conn := &relayDeadlineConn{packets: [][]byte{
+		{0x00},
+		{0xFF},
+		[]byte("GETCONF:51820|device|password"),
+	}}
+	packet, err := readInitialRelayPacket(conn, make([]byte, 128), 30*time.Second)
+	if err != nil {
+		t.Fatalf("readInitialRelayPacket: %v", err)
+	}
+	if string(packet) != "GETCONF:51820|device|password" {
+		t.Fatalf("packet = %q", packet)
+	}
+	if len(conn.deadlines) != len(conn.packets) {
+		t.Fatalf("deadlines = %d, want %d", len(conn.deadlines), len(conn.packets))
+	}
+	for i := 1; i < len(conn.deadlines); i++ {
+		if !conn.deadlines[i].Equal(conn.deadlines[0]) {
+			t.Fatalf("deadline %d changed from %v to %v", i, conn.deadlines[0], conn.deadlines[i])
+		}
+	}
+}
+
+type relayDeadlineConn struct {
+	packets   [][]byte
+	readIndex int
+	deadlines []time.Time
+}
+
+func (c *relayDeadlineConn) Read(p []byte) (int, error) {
+	if c.readIndex >= len(c.packets) {
+		return 0, io.EOF
+	}
+	packet := c.packets[c.readIndex]
+	c.readIndex++
+	return copy(p, packet), nil
+}
+
+func (c *relayDeadlineConn) Write(p []byte) (int, error) { return len(p), nil }
+func (c *relayDeadlineConn) Close() error                { return nil }
+func (c *relayDeadlineConn) LocalAddr() net.Addr         { return nil }
+func (c *relayDeadlineConn) RemoteAddr() net.Addr        { return nil }
+func (c *relayDeadlineConn) SetDeadline(time.Time) error { return nil }
+func (c *relayDeadlineConn) SetReadDeadline(deadline time.Time) error {
+	c.deadlines = append(c.deadlines, deadline)
+	return nil
+}
+func (c *relayDeadlineConn) SetWriteDeadline(time.Time) error { return nil }
 
 func TestRelayIdleTimeoutSelection(t *testing.T) {
 	timeouts := relayIdleTimeouts{

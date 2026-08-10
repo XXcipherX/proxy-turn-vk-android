@@ -801,9 +801,9 @@ func isRelayKeepalive(packet []byte) bool {
 	return len(packet) == 1 && (packet[0] == 0x00 || packet[0] == 0xFF)
 }
 
-func readRelayPacket(clientConn net.Conn, buf []byte, idleTimeout time.Duration) ([]byte, error) {
+func readRelayPacketWithDeadline(clientConn net.Conn, buf []byte, deadlineForRead func() time.Time) ([]byte, error) {
 	for {
-		if err := clientConn.SetReadDeadline(time.Now().Add(idleTimeout)); err != nil {
+		if err := clientConn.SetReadDeadline(deadlineForRead()); err != nil {
 			return nil, err
 		}
 		n, err := clientConn.Read(buf)
@@ -816,6 +816,19 @@ func readRelayPacket(clientConn net.Conn, buf []byte, idleTimeout time.Duration)
 		}
 		return packet, nil
 	}
+}
+
+func readRelayPacket(clientConn net.Conn, buf []byte, idleTimeout time.Duration) ([]byte, error) {
+	return readRelayPacketWithDeadline(clientConn, buf, func() time.Time {
+		return time.Now().Add(idleTimeout)
+	})
+}
+
+func readInitialRelayPacket(clientConn net.Conn, buf []byte, timeout time.Duration) ([]byte, error) {
+	deadline := time.Now().Add(timeout)
+	return readRelayPacketWithDeadline(clientConn, buf, func() time.Time {
+		return deadline
+	})
 }
 
 type relayIdleTimeouts struct {
@@ -896,7 +909,7 @@ func handleConn(
 	}()
 
 	buf := make([]byte, 1600)
-	firstPacket, err := readRelayPacket(clientConn, buf, 30*time.Second)
+	firstPacket, err := readInitialRelayPacket(clientConn, buf, initialRelayTimeout)
 	if err != nil {
 		return
 	}

@@ -13,6 +13,7 @@ const (
 	wgMTU                 = 1280
 	keepalive             = 25
 	dtlsHandshakeTimeout  = 15 * time.Second
+	initialRelayTimeout   = 30 * time.Second
 	defaultLegacyRelayIdleTime = 3 * time.Minute
 	defaultV2RelayIdleTime     = 30 * time.Minute
 	defaultLegacyConnCap       = 64
