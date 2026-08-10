@@ -45,6 +45,9 @@ var (
 	activeV2Conns        int32
 	activeLegacyConns    int32
 	totalConns           int64
+	admittedConns        int64
+	successfulHandshakes int64
+	failedHandshakes     int64
 	rejectedConns        int64
 	natType              string = "Инициализация..."
 	serverStartTime      time.Time
@@ -69,6 +72,9 @@ func statsLoop(ctx context.Context, configDir string, lifecycleRegistry *relayLi
 			activeV2 := atomic.LoadInt32(&activeV2Conns)
 			activeLegacy := atomic.LoadInt32(&activeLegacyConns)
 			total := atomic.LoadInt64(&totalConns)
+			admitted := atomic.LoadInt64(&admittedConns)
+			handshakes := atomic.LoadInt64(&successfulHandshakes)
+			handshakeFailures := atomic.LoadInt64(&failedHandshakes)
 			rejected := atomic.LoadInt64(&rejectedConns)
 			lifecycle := lifecycleRegistry.Stats()
 			uptime := time.Since(serverStartTime)
@@ -82,29 +88,40 @@ func statsLoop(ctx context.Context, configDir string, lifecycleRegistry *relayLi
 			downGB := float64(toC) / (1024 * 1024 * 1024)
 			upGB := float64(fromC) / (1024 * 1024 * 1024)
 
-			log.Printf("[СТАТ] Активных: %d (v2: %d, legacy: %d) | Принято за uptime: %d | Отклонено лимитом: %d | Заменено v2: %d | Отклонено stale v2: %d | Вытеснено legacy: %d | Uptime: %s | Получено: %.2f GB | Отправлено: %.2f GB | Паролей: %d | Устройств: %d",
-				active, activeV2, activeLegacy, total, rejected, lifecycle.V2Replaced, lifecycle.V2StaleDenied,
+			log.Printf("[СТАТ] Активных: %d (v2: %d, legacy: %d) | Relay за uptime: %d | Допущено к DTLS: %d | DTLS успешно: %d | Ошибок DTLS: %d | Отклонено до DTLS: %d | Заменено v2: %d | Отклонено stale v2: %d | Вытеснено legacy: %d | Uptime: %s | Получено: %.2f GB | Отправлено: %.2f GB | Паролей: %d | Устройств: %d",
+				active, activeV2, activeLegacy, total, admitted, handshakes, handshakeFailures, rejected, lifecycle.V2Replaced, lifecycle.V2StaleDenied,
 				lifecycle.LegacyEvicted, uptimeStr, downGB, upGB, numPasswords, numDevices)
 
-			statsJSON, _ := json.Marshal(map[string]interface{}{
-				"active":               active,
-				"active_v2":            activeV2,
-				"active_legacy":        activeLegacy,
-				"total":                total,
-				"accepted_since_start": total,
-				"rejected":             rejected,
-				"v2_replaced":          lifecycle.V2Replaced,
-				"v2_stale_denied":      lifecycle.V2StaleDenied,
-				"legacy_evicted":       lifecycle.LegacyEvicted,
-				"nat":                  natType,
-				"uptime":               uptimeStr,
-				"down_gb":              fmt.Sprintf("%.2f", downGB),
-				"up_gb":                fmt.Sprintf("%.2f", upGB),
-				"passwords":            numPasswords,
-				"devices":              numDevices,
-				"timestamp":            time.Now().Unix(),
+			statsJSON, err := json.Marshal(map[string]interface{}{
+				"active":                         active,
+				"active_v2":                      activeV2,
+				"active_legacy":                  activeLegacy,
+				"total":                          total,
+				"accepted_since_start":           total,
+				"relay_sessions_since_start":     total,
+				"admitted_since_start":           admitted,
+				"dtls_handshakes_since_start":    handshakes,
+				"dtls_handshake_failures":        handshakeFailures,
+				"rejected":                       rejected,
+				"admission_rejected_since_start": rejected,
+				"v2_replaced":                    lifecycle.V2Replaced,
+				"v2_stale_denied":                lifecycle.V2StaleDenied,
+				"legacy_evicted":                 lifecycle.LegacyEvicted,
+				"nat":                            natType,
+				"uptime":                         uptimeStr,
+				"down_gb":                        fmt.Sprintf("%.2f", downGB),
+				"up_gb":                          fmt.Sprintf("%.2f", upGB),
+				"passwords":                      numPasswords,
+				"devices":                        numDevices,
+				"timestamp":                      time.Now().Unix(),
 			})
-			os.WriteFile(statsFile, statsJSON, 0644)
+			if err != nil {
+				log.Printf("[СТАТ] Не удалось сериализовать статистику: %v", err)
+				continue
+			}
+			if err := os.WriteFile(statsFile, statsJSON, 0644); err != nil {
+				log.Printf("[СТАТ] Не удалось записать %s: %v", statsFile, err)
+			}
 		}
 	}
 }
@@ -831,7 +848,7 @@ func handleConn(
 	})
 	defer stopConnectionDeadline()
 
-	atomic.AddInt64(&totalConns, 1)
+	atomic.AddInt64(&admittedConns, 1)
 
 	dtlsConn, ok := clientConn.(*dtls.Conn)
 	if !ok {
@@ -841,9 +858,11 @@ func handleConn(
 	hctx, hcancel := context.WithTimeout(connCtx, dtlsHandshakeTimeout)
 	if err := dtlsConn.HandshakeContext(hctx); err != nil {
 		hcancel()
+		atomic.AddInt64(&failedHandshakes, 1)
 		return
 	}
 	hcancel()
+	atomic.AddInt64(&successfulHandshakes, 1)
 
 	connPassword := identity.Password
 	connIsMainPass := identity.IsMain
@@ -854,26 +873,21 @@ func handleConn(
 		log.Printf("[WRAP] Отказ: неактивный ключ %s для %s", maskPassword(connPassword), clientConn.RemoteAddr())
 		return
 	}
-	atomic.AddInt32(&activeConns, 1)
-	defer atomic.AddInt32(&activeConns, -1)
 	var relayModeTracked bool
 	var relayModeV2 bool
+	var relayActive bool
 	trackRelayMode := func(v2 bool) {
 		if relayModeTracked {
 			return
 		}
 		relayModeTracked = true
 		relayModeV2 = v2
-		if v2 {
-			atomic.AddInt32(&activeV2Conns, 1)
-		} else {
-			atomic.AddInt32(&activeLegacyConns, 1)
-		}
 	}
 	defer func() {
-		if !relayModeTracked {
+		if !relayActive {
 			return
 		}
+		atomic.AddInt32(&activeConns, -1)
 		if relayModeV2 {
 			atomic.AddInt32(&activeV2Conns, -1)
 		} else {
@@ -981,6 +995,14 @@ func handleConn(
 	if _, err := wgConn.Write(firstPacket); err != nil {
 		return
 	}
+	atomic.AddInt64(&totalConns, 1)
+	atomic.AddInt32(&activeConns, 1)
+	if relayModeV2 {
+		atomic.AddInt32(&activeV2Conns, 1)
+	} else {
+		atomic.AddInt32(&activeLegacyConns, 1)
+	}
+	relayActive = true
 	addTraffic(&totalBytesFromClient, &localUpBytes, len(firstPacket), !connIsMainPass)
 
 	pctx, pcancel := context.WithCancel(connCtx)
