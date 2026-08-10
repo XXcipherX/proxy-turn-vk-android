@@ -1,0 +1,55 @@
+name: Current iOS WRAP-A contract
+
+on:
+  push:
+    branches:
+      - main-new
+    paths:
+      - "tests/ios-wrapa-server-contract_test.go"
+      - ".github/workflows/ios-contract-ci.yml"
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-wrapa-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: 1.26.x
+
+jobs:
+  current-ios-contract:
+    name: Current iOS protocol contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout server contract fixture
+        uses: actions/checkout@v7
+
+      - name: Checkout current iOS client
+        uses: actions/checkout@v7
+        with:
+          repository: anton48/vk-turn-proxy-ios
+          ref: main
+          path: .client-contract/ios
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: .client-contract/ios/go.sum
+
+      - name: Inject independent server contract fixture
+        run: cp tests/ios-wrapa-server-contract_test.go .client-contract/ios/pkg/proxy/server_contract_test.go
+
+      - name: Verify current iOS protocol contract
+        working-directory: .client-contract/ios
+        run: |
+          go mod verify
+          go test -mod=readonly -count=1 -run '^TestServerCompatibility' -timeout=2m ./pkg/proxy

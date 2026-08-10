@@ -122,7 +122,7 @@ jobs:
         working-directory: .client-contract/ios
         run: |
           go mod verify
-          go test -mod=readonly -count=1 -run '^TestServerCompatibilityGoldenVector$' -timeout=2m ./pkg/proxy
+          go test -mod=readonly -count=1 -run '^TestServerCompatibility' -timeout=2m ./pkg/proxy
 
   race:
     name: Race detector
