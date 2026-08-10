@@ -21,6 +21,11 @@ import (
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 )
 
+const (
+	acceptErrorMinBackoff = 10 * time.Millisecond
+	acceptErrorMaxBackoff = time.Second
+)
+
 func resolveServerListenAddress(value string) (*net.UDPAddr, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -243,20 +248,30 @@ func main() {
 		identityLimit.generatedRate, identityLimit.perPasswordRate)
 	log.Println("[SERVER] Готов")
 
+	acceptErrorBackoff := time.Duration(0)
+acceptLoop:
 	for {
 		dtlsConn, err := listener.Accept()
 		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			if acceptErrorBackoff == 0 {
+				acceptErrorBackoff = acceptErrorMinBackoff
+			} else {
+				acceptErrorBackoff = min(acceptErrorBackoff*2, acceptErrorMaxBackoff)
+			}
+			log.Printf("[DTLS] Accept завершился ошибкой; повтор через %s: %v", acceptErrorBackoff, err)
+			retryTimer := time.NewTimer(acceptErrorBackoff)
 			select {
 			case <-ctx.Done():
-				workers.Wait()
-				if err := flushDB(); err != nil {
-					log.Printf("[DB] Финальное сохранение: %v", err)
-				}
-				return
-			default:
+				retryTimer.Stop()
+				break acceptLoop
+			case <-retryTimer.C:
 			}
 			continue
 		}
+		acceptErrorBackoff = 0
 		identity, ok := wrapListener.IdentityFor(dtlsConn.RemoteAddr())
 		if !ok {
 			atomic.AddInt64(&rejectedConns, 1)
@@ -291,5 +306,10 @@ func main() {
 				lifecycleV2: *v2RelayIdleTimeout,
 			})
 		}(dtlsConn, identity, remoteAddr)
+	}
+
+	workers.Wait()
+	if err := flushDB(); err != nil {
+		log.Printf("[DB] Финальное сохранение: %v", err)
 	}
 }
