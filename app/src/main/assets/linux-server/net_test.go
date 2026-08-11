@@ -6,7 +6,47 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+type recordingReadDeadlineSetter struct {
+	deadlines []time.Time
+}
+
+func (c *recordingReadDeadlineSetter) SetReadDeadline(deadline time.Time) error {
+	c.deadlines = append(c.deadlines, deadline)
+	return nil
+}
+
+func TestRelayReadDeadlineRefreshIsThrottled(t *testing.T) {
+	conn := &recordingReadDeadlineSetter{}
+	var refresher relayReadDeadlineRefresher
+	start := time.Unix(1_700_000_000, 0)
+	idleTimeout := 3 * time.Minute
+
+	for _, elapsed := range []time.Duration{0, time.Second, relayDeadlineRefreshInterval - time.Nanosecond} {
+		if err := refresher.refresh(conn, start.Add(elapsed), idleTimeout); err != nil {
+			t.Fatalf("refresh at %s: %v", elapsed, err)
+		}
+	}
+	if len(conn.deadlines) != 1 {
+		t.Fatalf("deadline updates = %d, want 1", len(conn.deadlines))
+	}
+	if want := start.Add(idleTimeout + relayDeadlineRefreshInterval); !conn.deadlines[0].Equal(want) {
+		t.Fatalf("first deadline = %s, want %s", conn.deadlines[0], want)
+	}
+
+	next := start.Add(relayDeadlineRefreshInterval)
+	if err := refresher.refresh(conn, next, idleTimeout); err != nil {
+		t.Fatalf("refresh at interval: %v", err)
+	}
+	if len(conn.deadlines) != 2 {
+		t.Fatalf("deadline updates = %d, want 2", len(conn.deadlines))
+	}
+	if want := next.Add(idleTimeout + relayDeadlineRefreshInterval); !conn.deadlines[1].Equal(want) {
+		t.Fatalf("second deadline = %s, want %s", conn.deadlines[1], want)
+	}
+}
 
 func TestAddTrafficIsImmediatelyVisible(t *testing.T) {
 	var total int64

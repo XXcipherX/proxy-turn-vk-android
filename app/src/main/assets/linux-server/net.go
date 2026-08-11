@@ -804,6 +804,29 @@ func isRelayKeepalive(packet []byte) bool {
 	return len(packet) == 1 && (packet[0] == 0x00 || packet[0] == 0xFF)
 }
 
+const relayDeadlineRefreshInterval = 5 * time.Second
+
+type readDeadlineSetter interface {
+	SetReadDeadline(time.Time) error
+}
+
+type relayReadDeadlineRefresher struct {
+	nextRefresh time.Time
+}
+
+func (r *relayReadDeadlineRefresher) refresh(conn readDeadlineSetter, now time.Time, idleTimeout time.Duration) error {
+	if !r.nextRefresh.IsZero() && now.Before(r.nextRefresh) {
+		return nil
+	}
+	// The extra interval keeps the effective idle timeout from becoming
+	// shorter when the final packet arrives just before the next refresh.
+	if err := conn.SetReadDeadline(now.Add(idleTimeout + relayDeadlineRefreshInterval)); err != nil {
+		return err
+	}
+	r.nextRefresh = now.Add(relayDeadlineRefreshInterval)
+	return nil
+}
+
 func readRelayPacketWithDeadline(clientConn net.Conn, buf []byte, deadlineForRead func() time.Time) ([]byte, error) {
 	for {
 		if err := clientConn.SetReadDeadline(deadlineForRead()); err != nil {
@@ -1081,12 +1104,15 @@ func handleConn(
 		defer pcancel()
 		b := getBuf()
 		defer putBuf(b)
+		var deadline relayReadDeadlineRefresher
 
 		for {
 			if pctx.Err() != nil {
 				return
 			}
-			clientConn.SetReadDeadline(time.Now().Add(relayIdleTimeout))
+			if err := deadline.refresh(clientConn, time.Now(), relayIdleTimeout); err != nil {
+				return
+			}
 
 			nn, err := clientConn.Read(*b)
 			if err != nil {
