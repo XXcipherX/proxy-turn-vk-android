@@ -398,6 +398,25 @@ func (c *staticPacketConn) SetDeadline(time.Time) error               { return n
 func (c *staticPacketConn) SetReadDeadline(time.Time) error           { return nil }
 func (c *staticPacketConn) SetWriteDeadline(time.Time) error          { return nil }
 
+func TestBufferedCryptoRandomReusesRefills(t *testing.T) {
+	var source bufferedCryptoRandom
+	first := make([]byte, 10)
+	if err := source.read(first); err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	if source.pos != 10 || source.remaining != wrapRandomBufferSize-10 {
+		t.Fatalf("state after first read = pos:%d remaining:%d", source.pos, source.remaining)
+	}
+
+	second := make([]byte, wrapRandomBufferSize)
+	if err := source.read(second); err != nil {
+		t.Fatalf("second read: %v", err)
+	}
+	if source.pos != 10 || source.remaining != wrapRandomBufferSize-10 {
+		t.Fatalf("state after refill-spanning read = pos:%d remaining:%d", source.pos, source.remaining)
+	}
+}
+
 func TestWrapPacketConnEndToEnd(t *testing.T) {
 	const pw = "e2e-main"
 	ks := newWrapKeyStore()
@@ -551,6 +570,15 @@ func TestObfsHotPathAllocsBounded(t *testing.T) {
 	})
 	if wrapScratchAllocs != 0 {
 		t.Errorf("obfsWrapPacketIntoWithNonce: %.1f allocs/op, want 0", wrapScratchAllocs)
+	}
+	var randomSource bufferedCryptoRandom
+	wrapBufferedAllocs := testing.AllocsPerRun(200, func() {
+		if _, err := obfsWrapPacketIntoWithRandom(dst, aead, payload, cfg, state, &wrapNonce, &randomSource); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if wrapBufferedAllocs != 0 {
+		t.Errorf("obfsWrapPacketIntoWithRandom: %.1f allocs/op, want 0", wrapBufferedAllocs)
 	}
 
 	

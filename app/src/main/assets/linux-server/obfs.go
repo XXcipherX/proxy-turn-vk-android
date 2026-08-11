@@ -27,6 +27,7 @@ const (
 	wrappedListenBacklog = 512
 	wrapReplayCacheSize  = 4096
 	wrapReplayTTL        = 30 * time.Second
+	wrapRandomBufferSize = 256
 )
 
 var (
@@ -70,6 +71,30 @@ type ObfsState struct {
 	timestamp  uint32
 	lastPacket time.Time
 	count      uint64
+}
+
+type bufferedCryptoRandom struct {
+	buf       [wrapRandomBufferSize]byte
+	pos       int
+	remaining int
+}
+
+func (r *bufferedCryptoRandom) read(dst []byte) error {
+	for len(dst) > 0 {
+		if r.remaining == 0 {
+			r.pos = 0
+			if _, err := rand.Read(r.buf[:]); err != nil {
+				r.remaining = 0
+				return err
+			}
+			r.remaining = len(r.buf)
+		}
+		n := copy(dst, r.buf[r.pos:r.pos+r.remaining])
+		r.pos += n
+		r.remaining -= n
+		dst = dst[n:]
+	}
+	return nil
 }
 
 func NewObfsConfig() *ObfsConfig {
@@ -167,13 +192,23 @@ func obfsWrapPacketInto(dst []byte, aead cipher.AEAD, payload []byte, cfg *ObfsC
 }
 
 func obfsWrapPacketIntoWithNonce(dst []byte, aead cipher.AEAD, payload []byte, cfg *ObfsConfig, state *ObfsState, nonce *[wrapNonceLen]byte) (int, error) {
+	return obfsWrapPacketIntoWithRandom(dst, aead, payload, cfg, state, nonce, nil)
+}
+
+func obfsWrapPacketIntoWithRandom(dst []byte, aead cipher.AEAD, payload []byte, cfg *ObfsConfig, state *ObfsState, nonce *[wrapNonceLen]byte, random *bufferedCryptoRandom) (int, error) {
 	if len(payload) == 0 {
 		return 0, errors.New("obfs: empty payload")
 	}
 
 	var randomBytes [5]byte
-	if _, err := rand.Read(randomBytes[:]); err != nil {
-		return 0, fmt.Errorf("obfs: random RTP metadata: %w", err)
+	var randomErr error
+	if random == nil {
+		_, randomErr = rand.Read(randomBytes[:])
+	} else {
+		randomErr = random.read(randomBytes[:])
+	}
+	if randomErr != nil {
+		return 0, fmt.Errorf("obfs: random RTP metadata: %w", randomErr)
 	}
 	seq, ts := state.nextHeader(time.Now(), randomBytes[2], randomBytes[4])
 
@@ -205,8 +240,13 @@ func obfsWrapPacketIntoWithNonce(dst []byte, aead cipher.AEAD, payload []byte, c
 	padStart := 12 + len(sealed)
 
 	if padRand > 0 {
-		if _, err := rand.Read(dst[padStart : padStart+padRand]); err != nil {
-			return 0, fmt.Errorf("obfs: random padding bytes: %w", err)
+		if random == nil {
+			_, randomErr = rand.Read(dst[padStart : padStart+padRand])
+		} else {
+			randomErr = random.read(dst[padStart : padStart+padRand])
+		}
+		if randomErr != nil {
+			return 0, fmt.Errorf("obfs: random padding bytes: %w", randomErr)
 		}
 	}
 	if padTotal > 0 {
@@ -469,6 +509,7 @@ type wrapPacketConn struct {
 	txMu    sync.Mutex
 	txBuf   []byte
 	txNonce [wrapNonceLen]byte
+	txRandom bufferedCryptoRandom
 
 	primedPacket []byte
 	primedAddr   net.Addr
@@ -580,7 +621,7 @@ func (c *wrapPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	if cap(c.txBuf) < need {
 		c.txBuf = make([]byte, need)
 	}
-	n, wErr := obfsWrapPacketIntoWithNonce(c.txBuf[:need], c.aead, p, c.obfsCfg, c.obfsWrite, &c.txNonce)
+	n, wErr := obfsWrapPacketIntoWithRandom(c.txBuf[:need], c.aead, p, c.obfsCfg, c.obfsWrite, &c.txNonce, &c.txRandom)
 	if wErr != nil {
 		return 0, fmt.Errorf("obfs wrap: %w", wErr)
 	}
