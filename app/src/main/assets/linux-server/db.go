@@ -1360,7 +1360,7 @@ func botLoop(ctx context.Context, token string, adminIDstr string, wgDev *device
 
 				} else if strings.HasPrefix(data, "react_") {
 					pass := strings.TrimPrefix(data, "react_")
-					_, changeErr := reactivateGeneratedPassword(pass)
+					_, changeErr := reactivateGeneratedPassword(wgDev, pass)
 					if changeErr != nil {
 						log.Printf("[DB] Активация %s: %v", maskPassword(pass), changeErr)
 						sendTelegram(token, adminID, fmt.Sprintf("❌ Не удалось надёжно сохранить активацию пароля `%s`", pass), nil)
@@ -1669,26 +1669,68 @@ func deactivateGeneratedPassword(wgDev *device.Device, password string) (bool, e
 	return true, nil
 }
 
-func reactivateGeneratedPassword(password string) (bool, error) {
+func reactivateGeneratedPassword(wgDev *device.Device, password string) (bool, error) {
+	return reactivateGeneratedPasswordWithPeerOps(
+		password,
+		func(dev *ClientDevice) error { return upsertPeerInWG(wgDev, dev) },
+		func(dev *ClientDevice) error { return removePeerFromWG(wgDev, dev) },
+	)
+}
+
+func reactivateGeneratedPasswordWithPeerOps(password string, upsertPeer, removePeer func(*ClientDevice) error) (bool, error) {
 	peerMutationMu.Lock()
 	defer peerMutationMu.Unlock()
+
 	dbMutex.Lock()
 	entry, exists := db.Passwords[password]
 	if !exists || entry == nil || isPasswordExpired(entry) {
 		dbMutex.Unlock()
 		return false, nil
 	}
-	entry.IsDeactivated = false
-	expiresAt := entry.ExpiresAt
-	dbMutex.Unlock()
-	if err := serverWrapKeys.AddPassword(password); err != nil {
-		dbMutex.Lock()
-		if current := db.Passwords[password]; current == entry {
-			current.IsDeactivated = true
-		}
+	if !entry.IsDeactivated {
 		dbMutex.Unlock()
+		return true, nil
+	}
+	expiresAt := entry.ExpiresAt
+	var deviceSnapshot *ClientDevice
+	if dev := db.Devices[entry.DeviceID]; dev != nil {
+		copy := *dev
+		deviceSnapshot = &copy
+	}
+	dbMutex.Unlock()
+
+	disablePasswordAccessState(password, false)
+	if err := serverWrapKeys.AddPassword(password); err != nil {
 		return true, fmt.Errorf("restore WRAP key: %w", err)
 	}
+	if deviceSnapshot != nil {
+		if err := upsertPeer(deviceSnapshot); err != nil {
+			serverWrapKeys.RemovePassword(password)
+			disablePasswordAccessState(password, false)
+			var cleanupErr error
+			if removeErr := removePeer(deviceSnapshot); removeErr != nil {
+				cleanupErr = fmt.Errorf("remove partially restored WireGuard peer: %w", removeErr)
+			}
+			return true, errors.Join(fmt.Errorf("restore WireGuard peer: %w", err), cleanupErr)
+		}
+	}
+
+	dbMutex.Lock()
+	if current := db.Passwords[password]; current != entry {
+		dbMutex.Unlock()
+		serverWrapKeys.RemovePassword(password)
+		disablePasswordAccessState(password, false)
+		var cleanupErr error
+		if deviceSnapshot != nil {
+			if removeErr := removePeer(deviceSnapshot); removeErr != nil {
+				cleanupErr = fmt.Errorf("remove restored WireGuard peer: %w", removeErr)
+			}
+		}
+		return true, errors.Join(errors.New("password changed during reactivation"), cleanupErr)
+	}
+	entry.IsDeactivated = false
+	dbMutex.Unlock()
+
 	if err := saveDBCritical(); err != nil {
 		dbMutex.Lock()
 		if current := db.Passwords[password]; current == entry {
@@ -1697,7 +1739,17 @@ func reactivateGeneratedPassword(password string) (bool, error) {
 		dbMutex.Unlock()
 		serverWrapKeys.RemovePassword(password)
 		disablePasswordAccessState(password, false)
-		return true, err
+		rollbackSaveErr := saveDBCritical()
+		var cleanupErr error
+		if deviceSnapshot != nil {
+			if removeErr := removePeer(deviceSnapshot); removeErr != nil {
+				cleanupErr = fmt.Errorf("remove restored WireGuard peer: %w", removeErr)
+			}
+		}
+		if rollbackSaveErr != nil {
+			rollbackSaveErr = fmt.Errorf("persist reactivation rollback: %w", rollbackSaveErr)
+		}
+		return true, errors.Join(err, rollbackSaveErr, cleanupErr)
 	}
 	setPasswordAccessState(password, false, true, expiresAt)
 	return true, nil

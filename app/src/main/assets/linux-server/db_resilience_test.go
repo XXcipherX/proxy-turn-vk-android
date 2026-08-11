@@ -157,6 +157,135 @@ func TestRemovePasswordAccessStateInvalidatesExistingReaders(t *testing.T) {
 	}
 }
 
+func TestReactivateGeneratedPasswordRestoresPeerBeforeAccess(t *testing.T) {
+	resetDelayedSaveStateForTest()
+	oldPersist := persistDatabase
+	oldDB := db
+	oldWrapKeys := serverWrapKeys
+	defer func() {
+		_ = serverWrapKeys.SetPasswords("", nil)
+		removePasswordAccessState("temporary-reactivate", false)
+		resetDelayedSaveStateForTest()
+		persistDatabase = oldPersist
+		db = oldDB
+		serverWrapKeys = oldWrapKeys
+	}()
+
+	const password = "temporary-reactivate"
+	expiresAt := time.Now().Add(time.Hour).Unix()
+	db = &Database{
+		MainPassword: "Main-Test_7kM9xQ2",
+		Passwords: map[string]*PasswordEntry{
+			password: {DeviceID: "generated-device", ExpiresAt: expiresAt, IsDeactivated: true},
+		},
+		Devices: map[string]*ClientDevice{
+			"generated-device": {DeviceID: "generated-device", IP: "10.66.66.2", PubKey: "test-key"},
+		},
+	}
+	serverWrapKeys = newWrapKeyStore()
+	if err := serverWrapKeys.SetPasswords(db.MainPassword, nil); err != nil {
+		t.Fatalf("SetPasswords: %v", err)
+	}
+	accessState := setPasswordAccessState(password, false, false, expiresAt)
+	persistDatabase = func() error { return nil }
+	var upserts, removals int
+
+	exists, err := reactivateGeneratedPasswordWithPeerOps(
+		password,
+		func(*ClientDevice) error {
+			upserts++
+			if accessState.IsActive() {
+				t.Fatal("access became active before the peer was restored")
+			}
+			return nil
+		},
+		func(*ClientDevice) error {
+			removals++
+			return nil
+		},
+	)
+	if err != nil || !exists {
+		t.Fatalf("reactivate = (%v, %v), want existing password without error", exists, err)
+	}
+	if upserts != 1 || removals != 0 {
+		t.Fatalf("peer operations = upsert:%d remove:%d, want 1/0", upserts, removals)
+	}
+	if db.Passwords[password].IsDeactivated {
+		t.Fatal("password remained deactivated")
+	}
+	if !accessState.IsActive() {
+		t.Fatal("access was not enabled after durable reactivation")
+	}
+	if serverWrapKeys.Count() != 2 {
+		t.Fatalf("WRAP key count = %d, want main and generated keys", serverWrapKeys.Count())
+	}
+}
+
+func TestReactivateGeneratedPasswordRollsBackPersistenceFailure(t *testing.T) {
+	resetDelayedSaveStateForTest()
+	oldPersist := persistDatabase
+	oldDB := db
+	oldWrapKeys := serverWrapKeys
+	defer func() {
+		_ = serverWrapKeys.SetPasswords("", nil)
+		removePasswordAccessState("temporary-reactivate-rollback", false)
+		resetDelayedSaveStateForTest()
+		persistDatabase = oldPersist
+		db = oldDB
+		serverWrapKeys = oldWrapKeys
+	}()
+
+	const password = "temporary-reactivate-rollback"
+	expiresAt := time.Now().Add(time.Hour).Unix()
+	db = &Database{
+		MainPassword: "Main-Test_7kM9xQ2",
+		Passwords: map[string]*PasswordEntry{
+			password: {DeviceID: "generated-device", ExpiresAt: expiresAt, IsDeactivated: true},
+		},
+		Devices: map[string]*ClientDevice{
+			"generated-device": {DeviceID: "generated-device", IP: "10.66.66.2", PubKey: "test-key"},
+		},
+	}
+	serverWrapKeys = newWrapKeyStore()
+	if err := serverWrapKeys.SetPasswords(db.MainPassword, nil); err != nil {
+		t.Fatalf("SetPasswords: %v", err)
+	}
+	accessState := setPasswordAccessState(password, false, false, expiresAt)
+	var persistAttempts int
+	persistDatabase = func() error {
+		persistAttempts++
+		if persistAttempts == 1 {
+			return errors.New("injected activation persistence failure")
+		}
+		return nil
+	}
+	var upserts, removals int
+
+	exists, err := reactivateGeneratedPasswordWithPeerOps(
+		password,
+		func(*ClientDevice) error { upserts++; return nil },
+		func(*ClientDevice) error { removals++; return nil },
+	)
+	if !exists || err == nil {
+		t.Fatalf("reactivate = (%v, %v), want existing password and persistence error", exists, err)
+	}
+	if persistAttempts != 2 {
+		t.Fatalf("persistence attempts = %d, want activation and rollback saves", persistAttempts)
+	}
+	if upserts != 1 || removals != 1 {
+		t.Fatalf("peer operations = upsert:%d remove:%d, want 1/1", upserts, removals)
+	}
+	if !db.Passwords[password].IsDeactivated {
+		t.Fatal("failed reactivation did not restore the deactivated flag")
+	}
+	if accessState.IsActive() {
+		t.Fatal("failed reactivation enabled access")
+	}
+	if serverWrapKeys.Count() != 1 {
+		t.Fatalf("WRAP key count = %d, want only the main key", serverWrapKeys.Count())
+	}
+}
+
 func validPersistentDatabaseForTest(t *testing.T) *Database {
 	t.Helper()
 	privateKey, publicKey, err := generateKeyPair()
