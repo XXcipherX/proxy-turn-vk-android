@@ -154,11 +154,6 @@ func commandExists(name string) bool {
 	return err == nil
 }
 
-func isNetTimeout(err error) bool {
-	ne, ok := err.(net.Error)
-	return ok && ne.Timeout()
-}
-
 func defaultInterfaceFromRoutes(routes string) string {
 	for _, line := range strings.Split(routes, "\n") {
 		fields := strings.Fields(line)
@@ -1140,23 +1135,13 @@ func handleConn(
 		b := getBuf()
 		defer putBuf(b)
 
-		var lastDeadlineUpdate time.Time
 		for {
 			if pctx.Err() != nil {
 				return
 			}
-			// Вызываем дедлайн только раз в 15 секунд
-			now := time.Now()
-			if now.Sub(lastDeadlineUpdate) > 15*time.Second {
-				wgConn.SetReadDeadline(now.Add(30 * time.Minute))
-				lastDeadlineUpdate = now
-			}
 
 			nn, err := wgConn.Read(*b)
 			if err != nil {
-				if isNetTimeout(err) && pctx.Err() == nil {
-					continue
-				}
 				return
 			}
 			if !passwordActive() {
