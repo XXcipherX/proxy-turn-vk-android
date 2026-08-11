@@ -543,6 +543,15 @@ func TestObfsHotPathAllocsBounded(t *testing.T) {
 	if wrapAllocs > obfsHotPathMaxAllocs {
 		t.Errorf("obfsWrapPacketInto: %.1f allocs/op, want <= %.0f", wrapAllocs, obfsHotPathMaxAllocs)
 	}
+	var wrapNonce [wrapNonceLen]byte
+	wrapScratchAllocs := testing.AllocsPerRun(200, func() {
+		if _, err := obfsWrapPacketIntoWithNonce(dst, aead, payload, cfg, state, &wrapNonce); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if wrapScratchAllocs != 0 {
+		t.Errorf("obfsWrapPacketIntoWithNonce: %.1f allocs/op, want 0", wrapScratchAllocs)
+	}
 
 	
 	wn, _ := obfsWrapPacketInto(dst, aead, payload, cfg, state)
@@ -554,6 +563,15 @@ func TestObfsHotPathAllocsBounded(t *testing.T) {
 	})
 	if unwrapAllocs > obfsHotPathMaxAllocs {
 		t.Errorf("obfsUnwrapPacketAEAD: %.1f allocs/op, want <= %.0f", unwrapAllocs, obfsHotPathMaxAllocs)
+	}
+	var unwrapNonce [wrapNonceLen]byte
+	unwrapScratchAllocs := testing.AllocsPerRun(200, func() {
+		if _, err := obfsUnwrapPacketAEADWithNonce(aead, wire, out, &unwrapNonce); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if unwrapScratchAllocs != 0 {
+		t.Errorf("obfsUnwrapPacketAEADWithNonce: %.1f allocs/op, want 0", unwrapScratchAllocs)
 	}
 
 	
@@ -600,8 +618,8 @@ func TestWrapPacketConnReadAllocsBounded(t *testing.T) {
 			t.Fatalf("ReadFrom length = %d, want %d", n, len(payload))
 		}
 	})
-	if allocs > obfsHotPathMaxAllocs {
-		t.Errorf("wrapPacketConn.ReadFrom: %.1f allocs/op, want <= %.0f", allocs, obfsHotPathMaxAllocs)
+	if allocs != 0 {
+		t.Errorf("wrapPacketConn.ReadFrom: %.1f allocs/op, want 0", allocs)
 	}
 }
 

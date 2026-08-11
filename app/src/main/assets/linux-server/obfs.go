@@ -162,6 +162,11 @@ func obfsWrapWireLen(payloadLen int, cfg *ObfsConfig) int {
 }
 
 func obfsWrapPacketInto(dst []byte, aead cipher.AEAD, payload []byte, cfg *ObfsConfig, state *ObfsState) (int, error) {
+	var nonce [wrapNonceLen]byte
+	return obfsWrapPacketIntoWithNonce(dst, aead, payload, cfg, state, &nonce)
+}
+
+func obfsWrapPacketIntoWithNonce(dst []byte, aead cipher.AEAD, payload []byte, cfg *ObfsConfig, state *ObfsState, nonce *[wrapNonceLen]byte) (int, error) {
 	if len(payload) == 0 {
 		return 0, errors.New("obfs: empty payload")
 	}
@@ -195,8 +200,7 @@ func obfsWrapPacketInto(dst []byte, aead cipher.AEAD, payload []byte, cfg *ObfsC
 	binary.BigEndian.PutUint32(dst[4:8], ts)
 	binary.BigEndian.PutUint32(dst[8:12], cfg.SSRC)
 
-	var nonce [12]byte
-	obfsBuildNonceInto(&nonce, cfg.SSRC, seq, ts)
+	obfsBuildNonceInto(nonce, cfg.SSRC, seq, ts)
 	sealed := aead.Seal(dst[12:12], nonce[:], payload, dst[:12])
 	padStart := 12 + len(sealed)
 
@@ -228,6 +232,11 @@ func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]b
 }
 
 func obfsUnwrapPacketAEAD(aead cipher.AEAD, wire, dst []byte) (int, error) {
+	var nonce [wrapNonceLen]byte
+	return obfsUnwrapPacketAEADWithNonce(aead, wire, dst, &nonce)
+}
+
+func obfsUnwrapPacketAEADWithNonce(aead cipher.AEAD, wire, dst []byte, nonce *[wrapNonceLen]byte) (int, error) {
 	if len(wire) < 13 {
 		return 0, errors.New("obfs: packet too short")
 	}
@@ -253,8 +262,7 @@ func obfsUnwrapPacketAEAD(aead cipher.AEAD, wire, dst []byte) (int, error) {
 	if ciphertextLen-chacha20poly1305.Overhead > len(dst) {
 		return 0, errors.New("obfs: dst buffer too small")
 	}
-	var nonce [12]byte
-	obfsBuildNonceInto(&nonce, ssrc, seq, ts)
+	obfsBuildNonceInto(nonce, ssrc, seq, ts)
 	plain, err := aead.Open(dst[:0], nonce[:], wire[12:payloadEnd], wire[:12])
 	if err != nil {
 		return 0, fmt.Errorf("obfs: auth: %w", err)
@@ -455,10 +463,12 @@ type wrapPacketConn struct {
 	obfsCfg   *ObfsConfig
 	obfsWrite *ObfsState
 
-	rxMu  sync.Mutex
-	rxBuf [maxWrappedPacketSize]byte
-	txMu  sync.Mutex
-	txBuf []byte
+	rxMu    sync.Mutex
+	rxBuf   [maxWrappedPacketSize]byte
+	rxNonce [wrapNonceLen]byte
+	txMu    sync.Mutex
+	txBuf   []byte
+	txNonce [wrapNonceLen]byte
 
 	primedPacket []byte
 	primedAddr   net.Addr
@@ -520,7 +530,7 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 
 		// Быстрый путь (Fast path) без повторного перебора хранилища ключей.
 		if atomic.LoadInt32(&c.selected) == 1 {
-			m, uErr := obfsUnwrapPacketAEAD(c.aead, raw, p)
+			m, uErr := obfsUnwrapPacketAEADWithNonce(c.aead, raw, p, &c.rxNonce)
 			if uErr != nil {
 				continue
 			}
@@ -570,7 +580,7 @@ func (c *wrapPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	if cap(c.txBuf) < need {
 		c.txBuf = make([]byte, need)
 	}
-	n, wErr := obfsWrapPacketInto(c.txBuf[:need], c.aead, p, c.obfsCfg, c.obfsWrite)
+	n, wErr := obfsWrapPacketIntoWithNonce(c.txBuf[:need], c.aead, p, c.obfsCfg, c.obfsWrite, &c.txNonce)
 	if wErr != nil {
 		return 0, fmt.Errorf("obfs wrap: %w", wErr)
 	}
