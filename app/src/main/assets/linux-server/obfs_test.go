@@ -382,6 +382,22 @@ func (c *fakePacketConn) SetDeadline(time.Time) error      { return nil }
 func (c *fakePacketConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *fakePacketConn) SetWriteDeadline(time.Time) error { return nil }
 
+type staticPacketConn struct {
+	packet []byte
+	addr   net.Addr
+}
+
+func (c *staticPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	return copy(p, c.packet), c.addr, nil
+}
+
+func (c *staticPacketConn) WriteTo(p []byte, _ net.Addr) (int, error) { return len(p), nil }
+func (c *staticPacketConn) Close() error                              { return nil }
+func (c *staticPacketConn) LocalAddr() net.Addr                       { return fakeAddr("server") }
+func (c *staticPacketConn) SetDeadline(time.Time) error               { return nil }
+func (c *staticPacketConn) SetReadDeadline(time.Time) error           { return nil }
+func (c *staticPacketConn) SetWriteDeadline(time.Time) error          { return nil }
+
 func TestWrapPacketConnEndToEnd(t *testing.T) {
 	const pw = "e2e-main"
 	ks := newWrapKeyStore()
@@ -549,6 +565,43 @@ func TestObfsHotPathAllocsBounded(t *testing.T) {
 	})
 	if wrapAllocs >= oldAllocs {
 		t.Errorf("new wrap (%.1f allocs) not better than old (%.1f allocs)", wrapAllocs, oldAllocs)
+	}
+}
+
+func TestWrapPacketConnReadAllocsBounded(t *testing.T) {
+	if raceEnabled {
+		t.Skip("race instrumentation distorts allocation counts")
+	}
+	key := testKey(t, "packet-conn-alloc-pass")
+	aead, err := getAEAD(key)
+	if err != nil {
+		t.Fatalf("getAEAD: %v", err)
+	}
+	payload := randPayload(t, 1200)
+	cfg := NewObfsConfig()
+	wire := make([]byte, obfsWrapWireLen(len(payload), cfg))
+	wn, err := obfsWrapPacketInto(wire, aead, payload, cfg, NewObfsState())
+	if err != nil {
+		t.Fatalf("wrap: %v", err)
+	}
+	conn := &wrapPacketConn{
+		inner:    &staticPacketConn{packet: wire[:wn], addr: fakeAddr("client")},
+		aead:     aead,
+		selected: 1,
+	}
+	out := make([]byte, len(payload))
+
+	allocs := testing.AllocsPerRun(200, func() {
+		n, _, readErr := conn.ReadFrom(out)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if n != len(payload) {
+			t.Fatalf("ReadFrom length = %d, want %d", n, len(payload))
+		}
+	})
+	if allocs > obfsHotPathMaxAllocs {
+		t.Errorf("wrapPacketConn.ReadFrom: %.1f allocs/op, want <= %.0f", allocs, obfsHotPathMaxAllocs)
 	}
 }
 

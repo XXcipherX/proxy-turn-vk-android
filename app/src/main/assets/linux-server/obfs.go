@@ -456,6 +456,7 @@ type wrapPacketConn struct {
 	obfsWrite *ObfsState
 
 	rxMu  sync.Mutex
+	rxBuf [maxWrappedPacketSize]byte
 	txMu  sync.Mutex
 	txBuf []byte
 
@@ -489,6 +490,9 @@ func (c *wrapPacketConn) Identity() (wrapIdentity, bool) {
 }
 
 func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	c.rxMu.Lock()
+	defer c.rxMu.Unlock()
+
 	if len(c.primedPacket) > 0 {
 		if len(p) < len(c.primedPacket) {
 			return 0, c.primedAddr, errors.New("wrap: destination buffer too small for admitted ClientHello")
@@ -500,23 +504,21 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		c.primedAddr = nil
 		return n, addr, nil
 	}
-	var buf [maxWrappedPacketSize]byte
-
 	// Повреждённый пакет не должен закрывать целую DTLS-сессию. Это особенно
 	// важно после аутентификации: UDP позволяет подмешать пакет в существующий
 	// 4-tuple, а Pion передаёт ошибку ReadFrom вверх как ошибку транспорта.
 	for {
-		n, addr, err := c.inner.ReadFrom(buf[:])
+		n, addr, err := c.inner.ReadFrom(c.rxBuf[:])
 		if err != nil {
 			return 0, addr, err
 		}
-		if n == 0 || buf[0] == 0x00 || buf[0] == 0x16 {
+		if n == 0 || c.rxBuf[0] == 0x00 || c.rxBuf[0] == 0x16 {
 			continue
 		}
 
-		raw := buf[:n]
+		raw := c.rxBuf[:n]
 
-		// Быстрый путь (Fast path) без захвата мьютекса для последующих пакетов.
+		// Быстрый путь (Fast path) без повторного перебора хранилища ключей.
 		if atomic.LoadInt32(&c.selected) == 1 {
 			m, uErr := obfsUnwrapPacketAEAD(c.aead, raw, p)
 			if uErr != nil {
@@ -525,20 +527,9 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 			return m, addr, nil
 		}
 
-		// Медленный путь (Slow path) с мьютексом только для выбора первого ключа.
-		c.rxMu.Lock()
-		if atomic.LoadInt32(&c.selected) == 1 {
-			m, uErr := obfsUnwrapPacketAEAD(c.aead, raw, p)
-			c.rxMu.Unlock()
-			if uErr != nil {
-				continue
-			}
-			return m, addr, nil
-		}
-
+		// Медленный путь (Slow path) выбирает ключ первого принятого пакета.
 		key, identity, m, uErr := c.keys.Unwrap(raw, p)
 		if uErr != nil {
-			c.rxMu.Unlock()
 			if atomic.CompareAndSwapInt32(&c.authLog, 0, 1) {
 				log.Printf("[WRAP] Отказ: RTP AEAD auth failed from %s (keys=%d)", addr.String(), c.keys.Count())
 			}
@@ -546,7 +537,6 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		}
 		aead, aErr := getAEAD(key)
 		if aErr != nil {
-			c.rxMu.Unlock()
 			return 0, addr, fmt.Errorf("wrap: cipher init: %w", aErr)
 		}
 		c.key = key
@@ -562,7 +552,6 @@ func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		}
 		c.obfsWrite = NewObfsState()
 		atomic.StoreInt32(&c.selected, 1)
-		c.rxMu.Unlock()
 		if atomic.CompareAndSwapInt32(&c.authLog, 0, 1) {
 			log.Printf("[WRAP] OK: ключ выбран для %s (keys=%d), PT=%d", addr.String(), c.keys.Count(), c.obfsCfg.PayloadType)
 		}
@@ -592,16 +581,21 @@ func (c *wrapPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 }
 
 func (c *wrapPacketConn) Close() error {
+	// Close the transport before taking rxMu so a blocked ReadFrom can return.
+	err := c.inner.Close()
 	c.closeOnce.Do(func() {
+		c.rxMu.Lock()
 		zeroBytes(c.primedPacket)
 		c.primedPacket = nil
+		c.primedAddr = nil
+		c.rxMu.Unlock()
 		zeroBytes(c.key)
 		c.key = nil
 		if c.onClose != nil {
 			c.onClose()
 		}
 	})
-	return c.inner.Close()
+	return err
 }
 func (c *wrapPacketConn) LocalAddr() net.Addr                { return c.inner.LocalAddr() }
 func (c *wrapPacketConn) SetDeadline(t time.Time) error      { return c.inner.SetDeadline(t) }
