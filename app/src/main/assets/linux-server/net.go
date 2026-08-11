@@ -761,18 +761,21 @@ func provisionClientConfig(wgDev *device.Device, keys *wgKeys, request getConfRe
 	deviceSnapshot := *dev
 	dbMutex.Unlock()
 
-	if err := upsertPeerInWG(wgDev, &deviceSnapshot); err != nil {
-		dbMutex.Lock()
-		if createdDevice {
+	// Persisted peers are restored before the relay listener starts. Only a
+	// newly allocated device needs to mutate the WireGuard peer table here;
+	// the remaining relay connections for that device reuse the existing peer.
+	if createdDevice {
+		if err := upsertPeerInWG(wgDev, &deviceSnapshot); err != nil {
+			dbMutex.Lock()
 			if current := db.Devices[request.DeviceID]; current != nil && current.PubKey == deviceSnapshot.PubKey {
 				delete(db.Devices, request.DeviceID)
 			}
+			if boundPassword && entry.DeviceID == request.DeviceID {
+				entry.DeviceID = ""
+			}
+			dbMutex.Unlock()
+			return "", "NOCONF", err
 		}
-		if boundPassword && entry.DeviceID == request.DeviceID {
-			entry.DeviceID = ""
-		}
-		dbMutex.Unlock()
-		return "", "NOCONF", err
 	}
 	// A new device or password binding must be durable before GETCONF succeeds.
 	// A dirty revision also covers a retry after an earlier synchronous save
