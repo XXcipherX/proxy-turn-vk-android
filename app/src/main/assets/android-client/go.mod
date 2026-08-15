@@ -11,7 +11,7 @@ require (
 	github.com/pion/logging v0.2.4
 	github.com/pion/transport/v4 v4.1.0
 	github.com/pion/turn/v5 v5.0.12
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 )
 
 require (
@@ -27,7 +27,7 @@ require (
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/tam7t/hpkp v0.0.0-20160821193359-2b70b4024ed5 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
-	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 )
