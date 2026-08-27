@@ -3,7 +3,7 @@
   # WDTT — WireGuard over TURN Tunnel
 <br>
   <img src="https://img.shields.io/badge/Android-API_28--35-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android API">
-  <img src="https://img.shields.io/badge/Go-1.26-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go Version">
+  <img src="https://img.shields.io/badge/Go-1.27.0-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go Version">
   <img src="https://img.shields.io/badge/Kotlin-Compose-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white" alt="Kotlin">
   <a href="https://github.com/XXcipherX/proxy-turn-vk-android/stargazers">
     <img src="https://img.shields.io/github/stars/XXcipherX/proxy-turn-vk-android?style=for-the-badge&logo=github&color=ffca28&labelColor=24292e" alt="Stars">

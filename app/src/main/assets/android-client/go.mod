@@ -1,6 +1,6 @@
 module wg-turn-client
 
-go 1.26
+go 1.27.0
 
 require (
 	github.com/bogdanfinn/fhttp v0.6.8

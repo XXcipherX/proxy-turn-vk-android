@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: 1.26.x
+  GO_VERSION: 1.27.x
 
 jobs:
   current-ios-contract:

@@ -1,6 +1,6 @@
 module wg-turn-client
 
-go 1.25.0
+go 1.27.0
 
 require (
 	github.com/pion/dtls/v3 v3.1.5
