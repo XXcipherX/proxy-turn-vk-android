@@ -2,8 +2,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/google/btree v1.1.2 h1:xf4v41cLI2Z6FxbKm+8Bu+m8ifhj15JuZ9sa0jZCMUU=
 github.com/google/btree v1.1.2/go.mod h1:qOPhT0dTNdNzV6Z/lhRX0YXUafgPLFUh+gZMl761Gm4=
-github.com/pion/dtls/v3 v3.1.6 h1:wH1mfF30IPWBJssK+LRWSNu8AZ6yB0hVg4rBJOwF3U4=
-github.com/pion/dtls/v3 v3.1.6/go.mod h1:gz1K4jg6c+fq86oQMH4pilpCEOEPwmEr2jY+VcF/mkU=
+github.com/pion/dtls/v3 v3.1.8 h1:aLcgjZqzrYn5AbjSds4LvK2WI5VzJc1PencExyDjYis=
+github.com/pion/dtls/v3 v3.1.8/go.mod h1:gz1K4jg6c+fq86oQMH4pilpCEOEPwmEr2jY+VcF/mkU=
 github.com/pion/logging v0.2.4 h1:tTew+7cmQ+Mc1pTBLKH2puKsOvhm32dROumOZ655zB8=
 github.com/pion/logging v0.2.4/go.mod h1:DffhXTKYdNZU+KtJ5pyQDjvOAh/GsNSyv1lbkFbe3so=
 github.com/pion/transport/v4 v4.1.0 h1:8S+nF2reM2cJuqC6g78OVy2BBgmbdns+acx3jA97BvQ=
