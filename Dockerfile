@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 
-ARG GO_VERSION=1.27.0
+ARG GO_VERSION=1.27.1
 
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-trixie AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -16,7 +16,7 @@ COPY app/src/main/assets/linux-server/ ./
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
   go build -mod=readonly -trimpath -ldflags="-s -w -checklinkname=0" -o /out/wdtt-server .
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates iproute2 iptables procps \

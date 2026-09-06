@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -167,7 +168,7 @@ func main() {
 	}
 
 	log.Println("══════════════════════════════════════════")
-	log.Println("   WDTT Server v2 (Multi-User)")
+	log.Printf("   WDTT Server v2 (Multi-User) (%s %s/%s)", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	log.Println("══════════════════════════════════════════")
 
 	ctx, cancel := context.WithCancel(context.Background())
