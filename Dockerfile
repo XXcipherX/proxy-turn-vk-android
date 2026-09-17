@@ -19,6 +19,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 FROM debian:trixie-slim
 
 RUN apt-get update \
+  && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends ca-certificates iproute2 iptables procps \
   && rm -rf /var/lib/apt/lists/*
 
