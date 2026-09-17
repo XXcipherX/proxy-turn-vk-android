@@ -9,7 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/pion/dtls/v3 v3.1.8
 	github.com/pion/logging v0.2.4
-	github.com/pion/transport/v4 v4.1.0
+	github.com/pion/transport/v4 v4.1.1
 	github.com/pion/turn/v5 v5.1.1
 	golang.org/x/crypto v0.57.0
 )
