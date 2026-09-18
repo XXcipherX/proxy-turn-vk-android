@@ -3,7 +3,7 @@ module wg-turn-client
 go 1.27.1
 
 require (
-	github.com/pion/dtls/v3 v3.1.8
+	github.com/pion/dtls/v3 v3.1.9
 	github.com/pion/transport/v4 v4.1.1
 	golang.org/x/crypto v0.57.0
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
@@ -12,6 +12,7 @@ require (
 require (
 	github.com/google/btree v1.1.2 // indirect
 	github.com/pion/logging v0.2.4 // indirect
+	github.com/pion/transport/v5 v5.0.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
