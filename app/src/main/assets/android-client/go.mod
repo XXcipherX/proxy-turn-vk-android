@@ -7,10 +7,10 @@ require (
 	github.com/bogdanfinn/tls-client v1.16.0
 	github.com/cbeuw/connutil v1.0.1
 	github.com/google/uuid v1.6.0
-	github.com/pion/dtls/v3 v3.1.8
+	github.com/pion/dtls/v3 v3.1.9
 	github.com/pion/logging v0.2.4
 	github.com/pion/transport/v4 v4.1.1
-	github.com/pion/turn/v5 v5.1.1
+	github.com/pion/turn/v5 v5.1.2
 	golang.org/x/crypto v0.57.0
 )
 
@@ -24,7 +24,8 @@ require (
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	github.com/pion/stun/v4 v4.0.0 // indirect
+	github.com/pion/stun/v4 v4.0.1 // indirect
+	github.com/pion/transport/v5 v5.0.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/tam7t/hpkp v0.0.0-20160821193359-2b70b4024ed5 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
